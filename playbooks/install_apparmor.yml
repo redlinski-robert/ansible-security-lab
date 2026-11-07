@@ -1,0 +1,98 @@
+﻿---
+- name: Zarzadzanie AppArmor na systemach Debian/Ubuntu
+  hosts: blue_group
+  become: true
+  vars:
+    apparmor_packages:
+      - "apparmor={{ package_versions_effective['apparmor'] }}"
+      - "apparmor-utils={{ package_versions_effective['apparmor-utils'] }}"
+      - "apparmor-profiles={{ package_versions_effective['apparmor-profiles'] }}"
+  
+  tasks:
+
+    # Na wypadek, gdyby konieczne bylo obnizenie wersji:
+    #
+    ## W instalacji trzeba ustawic wtedy force: yes (umozliwia downgrade)
+    ## Samo gather_facts: true nie wystarczy
+    #- name: Pobierz informacje o zainstalowanych pakietach
+    #  ansible.builtin.package_facts:
+    #      manager: auto
+    #
+    ## I dla kazdej paczki to samo (tu tylko dla apparmor)
+    #- name: Usun apparmor jesli wersja jest wyzsza niz zdefiniowana
+    #  apt:
+    #    name: apparmor
+    #    state: absent
+    #  when:
+    #    - "'apparmor' in ansible_facts.packages"
+    #    # strict=False ustala luzniejszy algorytm porownania
+    #    - "ansible_facts.packages['apparmor'][0].version is version(git_version, '>', strict=False)"
+
+    - name: AppArmor installation
+      block:
+        - name: Zdejmij blokade hold dla pakietow wymagajacych zmiany
+          ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+          vars:
+            package_guard_packages: "{{ apparmor_packages }}"
+
+        - name: Zainstaluj AppArmor i wymagane narzedzia w ustalonych wersjach
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages: "{{ apparmor_packages }}"
+            package_guard_apt_update_cache: true
+            package_guard_apt_retries: 5
+            package_guard_apt_delay: 10
+
+        - name: Upewnij sie, ze usluga AppArmor jest wlaczona i uruchomiona
+          ansible.builtin.systemd:
+            name: apparmor
+            enabled: yes
+            state: started
+
+        - name: Sprawdz stan AppArmor (aa-status)
+          ansible.builtin.command: aa-status
+          register: apparmor_status
+          changed_when: false
+          failed_when: false
+
+        - name: Wyswietl status AppArmor
+          debug:
+            msg: "{{ apparmor_status.stdout_lines[0] if apparmor_status.rc == 0 else 'AppArmor nie jest poprawnie skonfigurowany w jadrze' }}"
+        
+        # GRUB jest ogolnym configiem, dlatego dopisujemy parametry tylko wtedy,
+        # gdy w linii GRUB_CMDLINE_LINUX_DEFAULT brakuje obu wartosci.
+        # Parametry GRUB dotycza kolejnych uruchomien systemu. Zmiana moze
+        # wymagac restartu, o czym informuje handler.
+        - name: Upewnij sie, ze AppArmor jest aktywowany w parametrach GRUB
+          ansible.builtin.lineinfile:
+            path: "{{ grub_config_file }}"
+            regexp: '^GRUB_CMDLINE_LINUX_DEFAULT="(?!(?:[^"\n]*\bapparmor=1\b))(?!(?:[^"\n]*\bsecurity=apparmor\b))(.*)"$'
+            line: 'GRUB_CMDLINE_LINUX_DEFAULT="\1 apparmor=1 security=apparmor"'
+            backrefs: yes
+          register: grub_parameters_added
+
+        - name: Aktualizuj GRUB jesli zaszly zmiany
+          ansible.builtin.command: update-grub
+          when: grub_parameters_added.changed
+          notify: "Reboot info"
+          
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Ustaw blokade hold dla pakietow
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages: "{{ apparmor_packages }}"
+
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: install_apparmor"
+  handlers:
+    - name: Reboot info
+      ansible.builtin.debug:
+        msg: "Zmiany w GRUB zostaly wprowadzone. Wymagany restart systemu, aby w pelni aktywowac AppArmor."
+
+

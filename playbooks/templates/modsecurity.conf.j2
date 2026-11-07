@@ -1,0 +1,26 @@
+SecRuleEngine {{ modsecurity_rule_engine }}
+SecRequestBodyAccess On
+SecResponseBodyAccess Off
+
+SecRequestBodyLimit 13107200
+SecRequestBodyNoFilesLimit 131072
+SecRequestBodyLimitAction Reject
+
+SecPcreMatchLimit 100000
+SecPcreMatchLimitRecursion 100000
+
+SecTmpDir /tmp/
+SecDataDir /var/cache/modsecurity
+SecUploadDir /var/cache/modsecurity/upload
+SecUploadKeepFiles Off
+
+SecAuditEngine RelevantOnly
+SecAuditLogRelevantStatus "^(?:5|4(?!04))"
+SecAuditLogParts ABIJDEFHZ
+SecAuditLogType Serial
+SecAuditLog /var/log/nginx/modsec_audit.log
+
+SecDebugLog /var/log/nginx/modsec_debug.log
+SecDebugLogLevel 0
+
+SecUnicodeMapFile {{ modsecurity_unicode_mapping }} 20127

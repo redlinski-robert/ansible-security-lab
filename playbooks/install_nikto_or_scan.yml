@@ -1,0 +1,193 @@
+﻿---
+- name: Instalacja Nikto i skanowanie hostow blue
+  hosts: scanner_servers
+  become: true
+  gather_facts: false
+
+  vars:
+    nikto_target_group: blue_group
+    nikto_target_protocol: "http"
+    nikto_target_port: 80
+    get_from_nmap: true
+    nikto_input_file: "{{ playbook_dir }}/input/nmap/nikto_input.json"
+    nikto_report_root: "{{ playbook_dir }}/../reports/nikto"
+    nikto_version: "{{ package_versions_effective['nikto'] }}"
+
+  pre_tasks:
+    # Jesli get_from_nmap jest wlaczone i plik istnieje, cele sa odczytywane
+    # z wynikow Nmap na kontrolerze. W przeciwnym razie pochodza z inventory.
+    - name: Sprawdzenie, czy grupa docelowa istnieje w inventory
+      ansible.builtin.assert:
+        that:
+          - nikto_target_group in groups
+          - groups[nikto_target_group] | length > 0
+        fail_msg: "Grupa '{{ nikto_target_group }}' nie istnieje albo nie zawiera hostow."
+
+    - name: Ustawienie batch id na masterze Ansible
+      ansible.builtin.set_fact:
+        nikto_batch_id: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+      delegate_to: localhost
+      delegate_facts: true
+      run_once: true
+      become: false
+
+    - name: Sprawdzenie, czy istnieje plik wejscia Nikto z Nmap
+      ansible.builtin.stat:
+        path: "{{ nikto_input_file }}"
+      register: nikto_input_stat
+      delegate_to: localhost
+      run_once: true
+      become: false
+
+    - name: Wczytanie pliku wejscia Nikto z Nmap
+      ansible.builtin.slurp:
+        src: "{{ nikto_input_file }}"
+      register: nikto_input_raw
+      delegate_to: localhost
+      run_once: true
+      become: false
+      when:
+        - get_from_nmap | bool
+        - nikto_input_stat.stat.exists
+
+    - name: Przygotowanie pustej listy targetow Nikto
+      ansible.builtin.set_fact:
+        nikto_targets: []
+
+    - name: Uzycie targetow Nikto z inputu Nmap
+      ansible.builtin.set_fact:
+        nikto_targets: "{{ (nikto_input_raw.content | b64decode | from_json).targets | default([]) }}"
+      when:
+        - get_from_nmap | bool
+        - nikto_input_stat.stat.exists
+
+    - name: Zbudowanie targetow Nikto z inventory
+      ansible.builtin.set_fact:
+        nikto_targets: "{{ nikto_targets + [nikto_inventory_target] }}"
+      vars:
+        nikto_inventory_target:
+          host: "{{ hostvars[item].ansible_host }}"
+          port: "{{ nikto_target_port }}"
+          scheme: "{{ nikto_target_protocol }}"
+          url: "{{ nikto_target_protocol }}://{{ hostvars[item].ansible_host }}:{{ nikto_target_port }}"
+      loop: "{{ groups[nikto_target_group] }}"
+      when: not (get_from_nmap | bool and nikto_input_stat.stat.exists)
+
+    - name: Sprawdzenie, czy lista targetow nie jest pusta
+      ansible.builtin.assert:
+        that:
+          - nikto_targets | length > 0
+        fail_msg: "Nie udalo sie zbudowac listy targetow dla Nikto."
+
+    - name: Utworzenie katalogu raportow na localhost
+      ansible.builtin.file:
+        path: "{{ nikto_report_root }}/{{ hostvars['localhost']['nikto_batch_id'] }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      run_once: true
+      become: false
+
+  tasks:
+    - name: Sprawdz zainstalowana wersje pakietu Nikto
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - -f=${Version}
+          - nikto
+      register: nikto_installed_version
+      changed_when: false
+      failed_when: false
+
+    - name: Sprawdz blokade hold pakietu Nikto
+      ansible.builtin.command:
+        argv:
+          - dpkg
+          - --get-selections
+          - nikto
+      register: nikto_package_selection
+      changed_when: false
+      failed_when: false
+
+    - name: Ustal czy pakiet wymaga instalacji lub zmiany wersji
+      ansible.builtin.set_fact:
+        nikto_package_change_required: >-
+          {{
+            nikto_installed_version.rc != 0 or
+            nikto_installed_version.stdout | trim != nikto_version
+          }}
+        nikto_package_held: "{{ nikto_package_selection.stdout is search('\\bhold$') }}"
+      changed_when: false
+
+    - name: Instalacja i uruchomienie skanowania Nikto
+      block:
+        - name: Zdejmij blokade hold dla pakietu wymagajacego zmiany
+          ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+          vars:
+            package_guard_packages:
+              - "nikto={{ nikto_version }}"
+
+        - name: Aktualizacja cache i instalacja Nikto
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages:
+              - "nikto={{ nikto_version }}"
+            package_guard_apt_update_cache: true
+            package_guard_apt_retries: 5
+            package_guard_apt_delay: 10
+
+        # Nikto dziala na scannerze, a raporty sa pobierane na kontroler.
+        - name: Uruchom skanowanie Nikto dla hostow docelowych
+          ansible.builtin.command:
+            argv:
+              - nikto
+              - "-h"
+              - "{{ item.url }}"
+              - "-nointeractive"
+              - "-ask"
+              - "no"
+              - "-maxtime"
+              - "5m"
+              - "-Format"
+              - "txt"
+              - "-output"
+              - "/tmp/nikto_{{ hostvars['localhost']['nikto_batch_id'] }}_{{ inventory_hostname }}_{{ item.host | regex_replace('[^A-Za-z0-9_.-]', '_') }}_{{ item.port }}.txt"
+          loop: "{{ nikto_targets }}"
+          register: nikto_output
+          become: false
+          # false, zeby falszywie nie wplywac na test idempotentnosci.
+          # W rzeczywistosci za kazdym razem jest tworzony nowy raport.
+          changed_when: false
+          failed_when: false
+
+        - name: Wyswietl podsumowanie skanowania w konsoli
+          ansible.builtin.debug:
+            msg: "{{ item.stdout_lines }}"
+          loop: "{{ nikto_output.results }}"
+          when: item.stdout_lines is defined
+
+        - name: Pobranie raportow Nikto na master Ansible
+          # changed dopuszczalny - to pobranie nowego pliku raportu z batch_id, wiec zawsze bedzie nowy plik
+          ansible.builtin.fetch:
+            src: "/tmp/nikto_{{ hostvars['localhost']['nikto_batch_id'] }}_{{ inventory_hostname }}_{{ item.host | regex_replace('[^A-Za-z0-9_.-]', '_') }}_{{ item.port }}.txt"
+            dest: "{{ nikto_report_root }}/{{ hostvars['localhost']['nikto_batch_id'] }}/"
+            flat: true
+          loop: "{{ nikto_targets }}"
+          failed_when: false
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Ustaw blokade hold dla pakietu
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages:
+              - "nikto={{ nikto_version }}"
+
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: install_nikto_or_scan"

@@ -1,0 +1,62 @@
+---
+# Specyficzny dla serwerow app baseline uprawnien do plikow.
+
+# Domyslne wartosci wlascicielskie
+app_owner: root
+app_group: root
+
+# Baseline uprawnien dla serwerow app
+permission_baseline_app:
+  - path: "{{ app_dir }}"
+    owner: "{{ app_owner }}"
+    group: "{{ app_group }}"
+    mode: "0755"
+    state: directory
+
+  - path: "{{ app_frontend_dir }}"
+    owner: "{{ app_owner }}"
+    group: "{{ app_group }}"
+    mode: "0755"
+    state: directory
+
+  - path: "{{ app_backend_dir }}"
+    owner: "{{ app_owner }}"
+    group: "{{ app_group }}"
+    mode: "0755"
+    state: directory
+
+  - path: "{{ app_docker_compose }}"
+    owner: "{{ app_owner }}"
+    group: "{{ app_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ docker_audit_rules_file }}"
+    owner: root
+    group: root
+    mode: "0640"
+    state: file
+
+  - path: "{{ docker_authz_policy_dir }}"
+    owner: root
+    group: root
+    mode: "0750"
+    state: directory
+
+  - path: "{{ docker_authz_policy_file }}"
+    owner: root
+    group: root
+    mode: "0640"
+    state: file
+
+  - path: "{{ docker_config_dir }}"
+    owner: root
+    group: root
+    mode: "0750"
+    state: directory
+
+  - path: "{{ docker_daemon_config_file }}"
+    owner: root
+    group: root
+    mode: "0640"
+    state: file

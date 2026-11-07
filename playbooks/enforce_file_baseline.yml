@@ -1,0 +1,480 @@
+﻿---
+- name: Egzekwowanie baseline plikow i uprawnien
+  hosts: "{{ file_baseline_target | default('all') }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  vars:
+    file_baseline_report_root: "{{ playbook_dir }}/../reports/file_baseline"
+    file_baseline_report_file: "{{ file_baseline_report_root }}/{{ inventory_hostname }}-file-baseline-report.txt"
+    controller_baseline_report_file: "{{ file_baseline_report_root }}/controller-file-baseline-report.txt"
+
+  tasks:
+    - block:
+        # permission_baseline laczy wpisy wspolne i grupowe z inventory.
+        # Wzorce tresci sa szukane po nazwie pliku w playbooks/files.
+        # Osobny controller_baseline dotyczy sciezek na kontrolerze.
+        # Faza 1: Walidacja zmiennych wejsciowych (Sanity Checks)
+        - name: "[Walidacja 1/3] Weryfikacja, czy zmienna 'permission_baseline' jest zdefiniowana jako lista"
+        # Sprawdza, czy zmienna permission_baseline w ogole istnieje i czy jest typem iterowalnym (lista).
+          ansible.builtin.assert:
+            that:
+              - permission_baseline is defined
+              - permission_baseline is iterable
+            fail_msg: "permission_baseline musi byc zdefiniowane jako lista elementow baseline."
+
+        - name: "[Walidacja 2/3] Weryfikacja unikalnosci sciezek oraz kompletnosci wymaganych pol w 'permission_baseline'"
+        # Upewnia sie, ze lista nie jest pusta, sciezki (path) sa unikalne i niepuste,
+        # oraz kazdy obiekt posiada komplet atrybutow: path, owner, group, mode, state.
+          ansible.builtin.assert:
+            that:
+              - permission_baseline | length > 0
+              - permission_baseline | map(attribute='path') | list | length == (permission_baseline | map(attribute='path') | list | unique | length)
+              - permission_baseline | selectattr('path', 'defined') | list | length == permission_baseline | length
+              - permission_baseline | selectattr('owner', 'defined') | list | length == permission_baseline | length
+              - permission_baseline | selectattr('group', 'defined') | list | length == permission_baseline | length
+              - permission_baseline | selectattr('mode', 'defined') | list | length == permission_baseline | length
+              - permission_baseline | selectattr('state', 'defined') | list | length == permission_baseline | length
+              - permission_baseline | selectattr('path', 'equalto', '') | list | length == 0
+            fail_msg: >-
+              Kazdy wpis permission_baseline musi miec unikalny path oraz zdefiniowane owner, group, mode i state.
+              Brakujace dane uprawnien dla sciezki nalezy uzupelnic przed wykonaniem enforce_file_baseline.
+
+        - name: "[Walidacja 3/3] Iteracyjna kontrola obecnosci atrybutow dla kazdej sciezki z osobna"
+        # Petla walidacyjna dajaca precyzyjny komunikat bledu z nazwa sciezki w przypadku braku ktoregos z pol.
+          ansible.builtin.assert:
+            that:
+              - item.path is defined
+              - item.owner is defined
+              - item.group is defined
+              - item.mode is defined
+              - item.state is defined
+            fail_msg: "Brak danych uprawnien dla sciezki {{ item.path | default('UNKNOWN_PATH') }}"
+          loop: "{{ permission_baseline }}"
+          loop_control:
+            label: "{{ item.path | default('UNKNOWN_PATH') }}"
+
+        - name: "[Kontroler] [Walidacja] Weryfikacja, czy controller_baseline jest zdefiniowane jako niepusta lista"
+          ansible.builtin.assert:
+            that:
+              - controller_baseline is defined
+              - controller_baseline is iterable
+              - controller_baseline | length > 0
+            fail_msg: "controller_baseline musi byc zdefiniowane jako niepusta lista elementow baseline."
+          when: controller_baseline is defined and controller_baseline | length == 0
+
+        - name: "[Kontroler] [Walidacja] Kontrola kompletnosci pol dla controller_baseline"
+          ansible.builtin.assert:
+            that:
+              - item.path is defined
+              - item.owner is defined
+              - item.group is defined
+              - item.mode is defined
+              - item.state is defined
+            fail_msg: "Brak danych uprawnien dla sciezki kontrolera {{ item.path | default('UNKNOWN_PATH') }}"
+          loop: "{{ controller_baseline | default([]) }}"
+          delegate_to: localhost
+          run_once: true
+          become: false
+          when: controller_baseline is defined and controller_baseline | length > 0
+
+        # Faza 2: Inspekcja Wstepna (Zbieranie stanu faktycznego przed remediacja)
+        - name: "[Raportowanie] Utworzenie katalogu na raporty baseline plikow na kontrolerze (localhost)"
+        # Tworzy strukture katalogow w reports/file_baseline na wezle kontrolnym Ansible.
+          ansible.builtin.file:
+            path: "{{ file_baseline_report_root }}"
+            state: directory
+            mode: "0755"
+          become: false
+          delegate_to: localhost
+          run_once: true
+
+        - name: "[Inspekcja 1/4] Pobranie metadanych o obecnym stanie sciezek na hoscie zdalnym (stat)"
+        # Sprawdza fizyczna obecnosc, typ (plik/katalog), wlasciciela, grupe
+        # oraz uprawnienia (mode) na serwerze docelowym.
+          ansible.builtin.stat:
+            path: "{{ item.path }}"
+          loop: "{{ permission_baseline }}"
+          register: baseline_file_stats
+          loop_control:
+            label: "{{ item.path }}"
+
+        - name: "[Inspekcja 2/4] Sprawdzenie obecnosci wzorcowych plikow zrodlowych w katalogu 'files' na kontrolerze"
+        # Sprawdza, czy w lokalnym katalogu playbooks/files/ znajduje sie plik
+        # wzorcowy odpowiadajacy nazwie pliku z baseline.
+          ansible.builtin.stat:
+            path: "{{ playbook_dir }}/files/{{ item.path | basename }}"
+          become: false
+          delegate_to: localhost
+          register: baseline_file_source_stats
+          loop: "{{ permission_baseline | selectattr('state', 'equalto', 'file') | list }}"
+          loop_control:
+            label: "{{ item.path }}"
+
+        - name: "[Inspekcja 3/4] Odczyt zawartosci wzorcowych plikow z katalogu 'files' na kontrolerze"
+        # Pobiera zawartosc wylacznie tych plikow wzorcowych, ktore fizycznie istnieja w playbooks/files/.
+        # Petla jest przefiltrowana, aby uniknac komunikatow 'skipping' dla braku wzorca zrodlowego na kontrolerze.
+          ansible.builtin.slurp:
+            path: "{{ playbook_dir }}/files/{{ item.path | basename }}"
+          become: false
+          delegate_to: localhost
+          register: baseline_file_source_slurp
+          loop: >-
+            {{
+              baseline_file_source_stats.results
+              | default([])
+              | selectattr('stat.exists', 'defined')
+              | selectattr('stat.exists', 'equalto', true)
+              | map(attribute='item')
+              | list
+            }}
+          loop_control:
+            label: "{{ item.path }}"
+
+        - name: "[Inspekcja 4/4] Odczyt zawartosci istniejacych plikow z hosta zdalnego do weryfikacji sum kontrolnych"
+        # Pobiera zawartosc plikow ze zdalnego hosta (jesli istnieja), aby
+        # obliczyc ich sumy sha256 i wykryc modyfikacje tresci.
+          ansible.builtin.slurp:
+            path: "{{ item.path }}"
+          register: baseline_file_remote_slurp
+          loop: >-
+            {{
+              baseline_file_stats.results
+              | default([])
+              | selectattr('stat.exists', 'defined')
+              | selectattr('stat.exists', 'equalto', true)
+              | selectattr('stat.isreg', 'defined')
+              | selectattr('stat.isreg', 'equalto', true)
+              | map(attribute='item')
+              | list
+            }}
+          loop_control:
+            label: "{{ item.path }}"
+
+        # Faza 3: Egzekwowanie i Remediacja
+        - name: "[Remediacja 1/2] Przywracanie brakujacych lub zmodyfikowanych plikow z katalogu wzorcowego 'files'"
+        # Kopiuje plik z playbooks/files/ na hosta zdalnego dla elementow majacych wzorzec w files/.
+        # Modul copy wykrywa brak pliku na hoscie LUB niezgodnosc zawartosci
+        # (hash SHA256), nadpisujac go poprawna trescia.
+        # Petla jest wstepnie przefiltrowana do istniejacych plikow zrodlowych,
+        # unikajac generowania komunikatow skipping.
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/files/{{ item.path | basename }}"
+            dest: "{{ item.path }}"
+            owner: "{{ item.owner }}"
+            group: "{{ item.group }}"
+            mode: "{{ item.mode }}"
+            attributes: "{{ item.attributes | default(omit) }}"
+            backup: false
+          loop: >-
+            {{
+              baseline_file_source_stats.results
+              | default([])
+              | selectattr('stat.exists', 'defined')
+              | selectattr('stat.exists', 'equalto', true)
+              | map(attribute='item')
+              | list
+            }}
+          loop_control:
+            label: "{{ item.path }}"
+          when: not ansible_check_mode
+
+        - name: "[Remediacja 2/2] Egzekwowanie docelowych uprawnien, wlasciciela, grupy i atrybutow dla plikow i katalogow"
+        # Wymusza poprawne wartosci owner, group, mode oraz opcjonalnych
+        # attributes na istniejacych plikach i katalogach na serwerze zdalnym.
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: "{{ item.state }}"
+            owner: "{{ item.owner }}"
+            group: "{{ item.group }}"
+            mode: "{{ item.mode }}"
+            attributes: "{{ item.attributes | default(omit) }}"
+          loop: >-
+            {{
+              baseline_file_stats.results
+              | default([])
+              | selectattr('stat.exists', 'defined')
+              | selectattr('stat.exists', 'equalto', true)
+              | map(attribute='item')
+              | list
+            }}
+          loop_control:
+            label: "{{ item.path }}"
+          when: not ansible_check_mode
+
+        # Faza 4: Inspekcja Koncowa (Po Remediacji)
+        - name: "[Inspekcja Po Remediacji 1/2] Odswiezenie metadanych sciezek baseline po wykonaniu remediacji"
+        # Pobiera aktualny stan sciezek po naprawie, zapewniajac dokladnosc koncowego raportu.
+          ansible.builtin.stat:
+            path: "{{ item.path }}"
+          loop: "{{ permission_baseline }}"
+          register: baseline_file_stats_final
+          loop_control:
+            label: "{{ item.path }}"
+
+        - name: "[Inspekcja Po Remediacji 2/2] Odswiezenie zawartosci plikow z hosta zdalnego po wykonaniu remediacji"
+        # Pobiera aktualna zawartosc plikow ze zdalnego hosta, aby w raporcie zapisac stan po naprawie.
+          ansible.builtin.slurp:
+            path: "{{ item.path }}"
+          register: baseline_file_remote_slurp_final
+          loop: >-
+            {{
+              baseline_file_stats_final.results
+              | default([])
+              | selectattr('stat.exists', 'defined')
+              | selectattr('stat.exists', 'equalto', true)
+              | selectattr('stat.isreg', 'defined')
+              | selectattr('stat.isreg', 'equalto', true)
+              | map(attribute='item')
+              | list
+            }}
+          loop_control:
+            label: "{{ item.path }}"
+
+        # Faza 5: Generowanie i zapisywanie raportu rozbieznosci (Raportowanie na koniec)
+        - name: "[Raportowanie] Generowanie linii raportu z analiza stanu koncowego"
+        # Tworzy wpisy raportu porownujac stan oczekiwany ze stanem koncowym
+        # (istnienie, typ, owner, group, mode, sha256).
+          ansible.builtin.set_fact:
+            file_baseline_report_lines: "{{ file_baseline_report_lines | default([]) + [ report_line ] }}"
+          loop: "{{ permission_baseline }}"
+          vars:
+            file_stat: >-
+              {{
+                (baseline_file_stats_final.results | default(baseline_file_stats.results | default([])))
+                | selectattr('item.path', 'defined')
+                | selectattr('item.path', 'equalto', item.path)
+                | map(attribute='stat')
+                | first
+                | default({})
+              }}
+            source_stat: >-
+              {{
+                (baseline_file_source_stats.results | default([]))
+                | selectattr('item.path', 'defined')
+                | selectattr('item.path', 'equalto', item.path)
+                | map(attribute='stat')
+                | first
+                | default({})
+              }}
+            source_hash: >-
+              {{
+                (baseline_file_source_slurp.results | default([]))
+                | selectattr('item.path', 'defined')
+                | selectattr('item.path', 'equalto', item.path)
+                | map(attribute='content')
+                | first
+                | default('')
+                | b64decode
+                | hash('sha256')
+              }}
+            remote_hash: >-
+              {{
+                (baseline_file_remote_slurp_final.results | default(baseline_file_remote_slurp.results | default([])))
+                | selectattr('item.path', 'defined')
+                | selectattr('item.path', 'equalto', item.path)
+                | map(attribute='content')
+                | first
+                | default('')
+                | b64decode
+                | hash('sha256')
+              }}
+            report_line: >-
+              {% set stat_exists = file_stat.exists | default(false) %}
+              {% set src_exists = source_stat.exists | default(false) %}
+              {% set expected_state = item.state | default('') %}
+              {% set actual_mode = (file_stat.mode | default('0') | string | int(base=8)) %}
+              {% set expected_mode = (item.mode | default('0000') | string | int(base=8)) %}
+              {{ item.path }}: {{ stat_exists | ternary('exists', 'missing') }}
+              {% if not stat_exists %}
+                {% if src_exists %} [zrodlo: files/{{ item.path | basename }}] {% else %} [brak zrodla] {% endif %}
+              {% else %}
+                {% if expected_state == 'directory' and not file_stat.isdir | default(false) %} [typ niezgodny: oczekiwano katalog] {% endif %}
+                {% if expected_state == 'file' and not file_stat.isreg | default(false) %} [typ niezgodny: oczekiwano plik] {% endif %}
+                {% if expected_state == 'file' and src_exists and source_hash != remote_hash %} [zawartosc niezgodna] {% endif %}
+                {% if file_stat.pw_name | default('') != (item.owner | default('')) %} owner={{ file_stat.pw_name | default('unknown') }} -> {{ item.owner | default('unknown') }} {% endif %}
+                {% if file_stat.gr_name | default('') != (item.group | default('')) %} group={{ file_stat.gr_name | default('unknown') }} -> {{ item.group | default('unknown') }} {% endif %}
+                {% if actual_mode != expected_mode %} mode={{ '%04o' % actual_mode }} -> {{ item.mode | default('0000') }} {% endif %}
+              {% endif %}
+
+        - name: "[Kontroler] [Inspekcja / Remediacja] Sprawdzenie i egzekwowanie baseline dla plikow na kontrolerze"
+          when: controller_baseline is defined and controller_baseline | length > 0
+          delegate_to: localhost
+          run_once: true
+          become: false
+          block:
+            - name: "[Kontroler] [Inspekcja 1/4] Pobranie metadanych o obecnym stanie sciezek na localhost"
+              ansible.builtin.stat:
+                path: "{{ item.path }}"
+              loop: "{{ controller_baseline }}"
+              register: controller_baseline_stats
+              loop_control:
+                label: "{{ item.path }}"
+
+            - name: "[Kontroler] [Inspekcja 2/4] Sprawdzenie obecnosci wzorcowych plikow zrodlowych w katalogu 'files' na kontrolerze"
+              ansible.builtin.stat:
+                path: "{{ playbook_dir }}/files/{{ item.path | basename }}"
+              register: controller_baseline_source_stats
+              loop: "{{ controller_baseline | selectattr('state', 'equalto', 'file') | list }}"
+              loop_control:
+                label: "{{ item.path }}"
+
+            - name: "[Kontroler] [Inspekcja 3/4] Odczyt zawartosci wzorcowych plikow z katalogu 'files' na kontrolerze"
+              ansible.builtin.slurp:
+                path: "{{ playbook_dir }}/files/{{ item.path | basename }}"
+              register: controller_baseline_source_slurp
+              loop: >-
+                {{
+                  controller_baseline_source_stats.results
+                  | default([])
+                  | selectattr('stat.exists', 'defined')
+                  | selectattr('stat.exists', 'equalto', true)
+                  | map(attribute='item')
+                  | list
+                }}
+              loop_control:
+                label: "{{ item.path }}"
+
+            - name: "[Kontroler] [Remediacja 1/2] Przywracanie brakujacych lub zmodyfikowanych plikow na localhost z katalogu 'files'"
+              ansible.builtin.copy:
+                src: "{{ playbook_dir }}/files/{{ item.path | basename }}"
+                dest: "{{ item.path }}"
+                owner: "{{ item.owner }}"
+                group: "{{ item.group }}"
+                mode: "{{ item.mode }}"
+                attributes: "{{ item.attributes | default(omit) }}"
+                backup: false
+              loop: >-
+                {{
+                  controller_baseline_source_stats.results
+                  | default([])
+                  | selectattr('stat.exists', 'defined')
+                  | selectattr('stat.exists', 'equalto', true)
+                  | map(attribute='item')
+                  | list
+                }}
+              loop_control:
+                label: "{{ item.path }}"
+              when: not ansible_check_mode
+
+            - name: "[Kontroler] [Remediacja 2/2] Egzekwowanie docelowych uprawnien, wlasciciela i grupy dla plikow i katalogow na localhost"
+              ansible.builtin.file:
+                path: "{{ item.path }}"
+                state: "{{ item.state }}"
+                owner: "{{ item.owner }}"
+                group: "{{ item.group }}"
+                mode: "{{ item.mode }}"
+                attributes: "{{ item.attributes | default(omit) }}"
+              loop: >-
+                {{
+                  controller_baseline_stats.results
+                  | default([])
+                  | selectattr('stat.exists', 'defined')
+                  | selectattr('stat.exists', 'equalto', true)
+                  | map(attribute='item')
+                  | list
+                }}
+              loop_control:
+                label: "{{ item.path }}"
+              when: not ansible_check_mode
+
+            - name: "[Kontroler] [Raportowanie] Zbieranie wyniku sprawdzenia baseline na localhost"
+              ansible.builtin.set_fact:
+                controller_baseline_report_lines: "{{ controller_baseline_report_lines | default([]) + [ report_line ] }}"
+              loop: "{{ controller_baseline }}"
+              vars:
+                file_stat: >-
+                  {{
+                    (controller_baseline_stats.results | default([]))
+                    | selectattr('item.path', 'defined')
+                    | selectattr('item.path', 'equalto', item.path)
+                    | map(attribute='stat')
+                    | first
+                    | default({})
+                  }}
+                source_stat: >-
+                  {{
+                    (controller_baseline_source_stats.results | default([]))
+                    | selectattr('item.path', 'defined')
+                    | selectattr('item.path', 'equalto', item.path)
+                    | map(attribute='stat')
+                    | first
+                    | default({})
+                  }}
+                source_hash: >-
+                  {{
+                    (controller_baseline_source_slurp.results | default([]))
+                    | selectattr('item.path', 'defined')
+                    | selectattr('item.path', 'equalto', item.path)
+                    | map(attribute='content')
+                    | first
+                    | default('')
+                    | b64decode
+                    | hash('sha256')
+                  }}
+                report_line: >-
+                  {% set stat_exists = file_stat.exists | default(false) %}
+                  {% set src_exists = source_stat.exists | default(false) %}
+                  {% set expected_state = item.state | default('') %}
+                  {% set actual_mode = (file_stat.mode | default('0') | string | int(base=8)) %}
+                  {% set expected_mode = (item.mode | default('0000') | string | int(base=8)) %}
+                  {{ item.path }}: {{ stat_exists | ternary('exists', 'missing') }}
+                  {% if not stat_exists %}
+                    {% if src_exists %} [zrodlo: files/{{ item.path | basename }}] {% else %} [brak zrodla] {% endif %}
+                  {% else %}
+                    {% if expected_state == 'directory' and not file_stat.isdir | default(false) %} [typ niezgodny: oczekiwano katalog] {% endif %}
+                    {% if expected_state == 'file' and not file_stat.isreg | default(false) %} [typ niezgodny: oczekiwano plik] {% endif %}
+                    {% if file_stat.pw_name | default('') != (item.owner | default('')) %} owner={{ file_stat.pw_name | default('unknown') }} -> {{ item.owner | default('unknown') }} {% endif %}
+                    {% if file_stat.gr_name | default('') != (item.group | default('')) %} group={{ file_stat.gr_name | default('unknown') }} -> {{ item.group | default('unknown') }} {% endif %}
+                    {% if actual_mode != expected_mode %} mode={{ '%04o' % actual_mode }} -> {{ item.mode | default('0000') }} {% endif %}
+                  {% endif %}
+
+            - name: "[Kontroler] [Raportowanie] Zapisanie raportu baseline plikow dla localhost do pliku tekstowego"
+              ansible.builtin.copy:
+                dest: "{{ controller_baseline_report_file }}"
+                content: |
+                  Baseline plikow dla kontrolera: localhost
+                  Tryb: {{ ansible_check_mode | ternary('dry run', 'apply') }}
+
+                  {% for line in controller_baseline_report_lines | default([]) %}
+                  {{ line }}
+                  {% endfor %}
+                mode: "0644"
+              changed_when: false
+
+        - name: "[Raportowanie] Zapisanie koncowego raportu baseline plikow do pliku tekstowego na kontrolerze"
+        # Zapisuje zebrane dane do pliku tekstowego w reports/file_baseline/<hostname>-file-baseline-report.txt.
+          ansible.builtin.copy:
+            dest: "{{ file_baseline_report_file }}"
+            # Zawartosc raportu baseline plikow dla danego hosta
+
+            # {% %} oznacza blok kontrolny Jinja2, np. pętlę lub warunek
+            # {% for line in file_baseline_report_lines %} to jest zawartosc raportu dla kazdego hosta
+            # {{ line }} to jest pojedyncza linia raportu dla danego hosta
+            # Czy dla każdej linii w file_baseline_report_lines
+            # zostanie wygenerowana odpowiednia linia w raporcie
+
+            # dry run oznacza, że Ansible nie wprowadza zmian, tylko symuluje ich zastosowanie
+            # Ternary w zależności od trybu Ansible (check mode) wybiera 'dry run' lub 'apply'
+            content: |
+              Baseline plikow dla hosta: {{ inventory_hostname }}
+              Tryb: {{ ansible_check_mode | ternary('dry run', 'apply') }}
+          
+              {% for line in file_baseline_report_lines %}
+              {{ line }}
+              {% endfor %}
+            mode: "0644"
+          become: false
+          delegate_to: localhost
+          changed_when: false
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: enforce_file_baseline"

@@ -1,0 +1,177 @@
+---
+- name: Wdrozenie etckeeper i inicjalizacja wersjonowania /etc
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    etckeeper_git_user_name: "Ansible Etckeeper"
+    etckeeper_git_user_email: "etckeeper@lab.local"
+ 
+    etckeeper_on_kali: "{{ ansible_distribution | lower == 'kali' }}"
+    etckeeper_packages_pinned:
+      - "git={{ package_versions_effective['git'] }}"
+      - "etckeeper={{ package_versions_effective['etckeeper'] }}"
+    etckeeper_packages_unpinned:
+      - git
+      - etckeeper
+
+    etckeeper_packages: >-
+      {{
+        etckeeper_on_kali
+        | ternary(etckeeper_packages_unpinned, etckeeper_packages_pinned)
+      }}
+
+  pre_tasks:
+    # Na Kali playbook przygotowuje repozytorium pakietow. Dobor pakietow i
+    # przypiecie wersji zalezy od zebranej informacji o dystrybucji.
+    - name: Utworz katalog keyringow APT na Kali
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        mode: "0755"
+      when: etckeeper_on_kali
+
+    - name: Pobierz klucz repozytorium Kali
+      ansible.builtin.get_url:
+        url: https://archive.kali.org/archive-key.asc
+        dest: /usr/share/keyrings/kali-archive-keyring.asc
+        mode: "0644"
+        force: false
+      when: etckeeper_on_kali
+
+    - name: Sprawdz czy repozytorium Kali jest juz skonfigurowane
+      ansible.builtin.command: grep -rEl '^\s*deb\s.*http\.kali\.org/kali\s.*kali-rolling' /etc/apt/sources.list /etc/apt/sources.list.d/
+      register: kali_repo_existing
+      changed_when: false
+      failed_when: false
+      when: etckeeper_on_kali
+
+    - name: Dodaj repozytorium Kali Rolling
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/kali-archive-keyring.asc] http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware"
+        filename: kali-rolling
+        state: present
+        update_cache: true
+      when:
+        - etckeeper_on_kali
+        - kali_repo_existing.rc != 0
+
+  tasks:
+    - name: Wdrozenie etckeeper i inicjalizacja wersjonowania /etc
+      block:
+
+        - name: Zdejmij blokade hold dla pakietow wymagajacych zmiany
+          ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+          vars:
+            package_guard_packages: "{{ etckeeper_packages }}"
+
+        # Na wypadek, gdyby konieczne bylo obnizenie wersji:
+        #
+        ## Samo gather_facts: true nie wystarczy
+        ## W instalacji trzeba ustawic wtedy force: yes (umozliwia downgrade)
+        #- name: Pobierz informacje o zainstalowanych pakietach
+        #  ansible.builtin.package_facts:
+        #      manager: auto
+        #
+        ## I dla kazdej paczki to samo (tu tylko dla git - do pokazania jak to dziala)
+        #- name: Usun git jesli wersja jest wyzsza niz zdefiniowana
+        #  apt:
+        #    name: git
+        #    state: absent
+        #  when:
+        #    - "'git' in ansible_facts.packages"
+        #    # strict=False ustala luzniejszy algorytm porownania
+        #    - "ansible_facts.packages['git'][0].version is version(git_version, '>', strict=False)"
+
+        # Etckeeper wykorzystuje Git do wersjonowania /etc na kazdym hoscie.
+        # Dalsze zadania konfiguruja i sprawdzaja lokalne repozytorium.
+        - name: Instalacja git i etckeeper w ustalonych wersjach
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages: "{{ etckeeper_packages }}"
+            package_guard_apt_update_cache: true
+            package_guard_apt_retries: 5
+            package_guard_apt_delay: 10
+
+        # Konfiguracja instalacyjna etckeeper
+        - name: Kopiuj plik konfiguracyjny etckeeper
+          ansible.builtin.copy:
+            src: "files/etckeeper.conf"
+            dest: "/etc/etckeeper/etckeeper.conf"
+            mode: '0644'
+          register: etckeeper_conf_file
+
+        - name: Sprawdz czy /etc jest juz repozytorium git
+          ansible.builtin.stat:
+            path: /etc/.git
+          register: etc_git_dir
+
+        - name: Zainicjalizuj etckeeper
+          ansible.builtin.command: etckeeper init
+          when: not etc_git_dir.stat.exists
+
+        - name: Sprawdz obecna nazwe uzytkownika git w /etc
+          ansible.builtin.command: git config user.name
+          args:
+            chdir: /etc
+          register: current_git_name
+          changed_when: false
+          failed_when: false
+
+        - name: Ustaw lokalna nazwe uzytkownika git dla /etc
+          ansible.builtin.command: git config user.name "{{ etckeeper_git_user_name }}"
+          args:
+            chdir: /etc
+          when: current_git_name.stdout | default('') != etckeeper_git_user_name
+
+        - name: Sprawdz obecny email uzytkownika git w /etc
+          ansible.builtin.command: git config user.email
+          args:
+            chdir: /etc
+          register: current_git_email
+          changed_when: false
+          failed_when: false
+
+        - name: Ustaw lokalny email uzytkownika git dla /etc
+          ansible.builtin.command: git config user.email "{{ etckeeper_git_user_email }}"
+          args:
+            chdir: /etc
+          when: current_git_email.stdout | default('') != etckeeper_git_user_email
+
+        - name: Pokaz konfiguracje git w /etc
+          ansible.builtin.command: git config --list
+          args:
+            chdir: /etc
+          register: etckeeper_git_config
+          changed_when: false
+
+        - name: Pokaz ostatnie commity
+          ansible.builtin.command: git log --oneline -n 5
+          args:
+            chdir: /etc
+          register: etckeeper_log
+          changed_when: false
+
+        - name: Debug konfiguracji git
+          ansible.builtin.debug:
+            var: etckeeper_git_config.stdout_lines
+
+        - name: Debug logu repozytorium /etc
+          ansible.builtin.debug:
+            var: etckeeper_log.stdout_lines
+      
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Ustaw blokade hold dla pakietow
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages: "{{ etckeeper_packages }}"
+
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: install_etckeeper"

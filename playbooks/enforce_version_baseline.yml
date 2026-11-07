@@ -1,0 +1,264 @@
+﻿---
+- name: Egzekwowanie baseline wersji pakietow
+  hosts: "{{ version_baseline_target | default('all') }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  vars:
+    version_baseline_report_root: "{{ playbook_dir }}/../reports/version_baseline"
+    version_baseline_report_file: "{{ version_baseline_report_root }}/{{ inventory_hostname }}-version-baseline-report.txt"
+
+    # package_versions_effective zawiera wylacznie pakiety APT.
+    version_baseline_items: >-
+      {{ package_versions_effective
+         | default({})
+         | dict2items(key_name='name', value_name='version')
+         | list }}
+
+    # Osobny baseline PyPI zastepuje kosztowna izolacje virtualenv prosta kontrola wersji.
+    python_version_baseline_items: "{{ python_package_versions_effective | default({}) | dict2items(key_name='name', value_name='version') | list }}"
+
+  tasks:
+    - block:
+        # Wersje APT i Python sa porownywane osobno z baseline inventory.
+        # Wyniki koncowe trafiaja do raportu na kontrolerze dla kazdego hosta.
+        # Faza 1: Walidacja zmiennych wejsciowych
+        - name: "[Walidacja] Sprawdzenie, czy wersje baseline sa zdefiniowane w group_vars"
+        # Upewnia sie, ze slownik package_versions_effective zostal prawidlowo zaladowany z group_vars.
+          ansible.builtin.assert:
+            that:
+              - package_versions_effective is defined
+              - package_versions_effective is mapping
+              - version_baseline_items is iterable
+            fail_msg: "package_versions_effective musi byc zdefiniowane jako slownik wersji pakietow w group_vars."
+
+        # Faza 2: Przygotowanie raportowania i inspekcja wstepna
+        - name: "[Raportowanie] Utworzenie katalogu na raporty baseline wersji na kontrolerze (localhost)"
+        # Tworzy strukture katalogow w reports/version_baseline na masterze
+        # (wykonanie jako biezacy uzytkownik, bez root/sudo).
+          ansible.builtin.file:
+            path: "{{ version_baseline_report_root }}"
+            state: directory
+            mode: "0755"
+          become: false
+          delegate_to: localhost
+          run_once: true
+
+        - name: "[Inspekcja 1/2] Pobranie aktualnie zainstalowanych wersji pakietow z systemowego dpkg (dpkg-query)"
+        # Zwraca wersje zainstalowanego pakietu (stdout). Jesli pakiet nie jest
+        # zainstalowany, dpkg-query wyrzuca blad (rc != 0).
+        # `failed_when: false` zapobiega przerwaniu playbooka przy braku pakietu.
+          ansible.builtin.command:
+            cmd: "dpkg-query -W -f='${Version}' {{ item.name }}"
+          register: package_version_check
+          check_mode: false
+          failed_when: false
+          changed_when: false
+          loop: "{{ version_baseline_items }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: "[Analityka] Wyznaczenie waskiej listy pakietow wymagajacych aktualizacji lub instalacji"
+        # Wyznaczenie listy pakietow jako natywnej struktury danych (listy Pythona/Ansible)
+        # przy uzyciu filtra `from_json`, aby petla `loop` w kolejnych zadaniach otrzymywala typ List zamiast String.
+          ansible.builtin.set_fact:
+            packages_to_update: "{{ update_json | from_json }}"
+          vars:
+            update_json: >-
+              {% set update_list = [] %}
+              {% for res in package_version_check.results | default([]) %}
+                {% set installed_ver = res.stdout | default('') | trim %}
+                {% set expected_ver = res.item.version | default('') %}
+                {% if res.rc != 0 or installed_ver != expected_ver %}
+                  {% set _ = update_list.append(res.item) %}
+                {% endif %}
+              {% endfor %}
+              {{ update_list | to_json }}
+
+        - name: "[Analityka] Przygotowanie listy pakietow dla package_guard"
+          ansible.builtin.set_fact:
+            version_baseline_package_specs: "{{ version_baseline_package_specs | default([]) + [item.name ~ '=' ~ item.version] }}"
+          loop: "{{ version_baseline_items }}"
+          loop_control:
+            label: "{{ item.name }}"
+          changed_when: false
+
+        # Faza 2b: Inspekcja pakietow PyPI
+        - name: "[Inspekcja PyPI] Pobranie aktualnych wersji pakietow Python"
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -m
+              - pip
+              - show
+              - "{{ item.name }}"
+          register: python_package_version_check
+          check_mode: false
+          failed_when: false
+          changed_when: false
+          loop: "{{ python_version_baseline_items | default([]) }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: "[Analityka PyPI] Wyznaczenie pakietow Python wymagajacych aktualizacji"
+          ansible.builtin.set_fact:
+            python_packages_to_update: "{{ python_update_json | from_json }}"
+          vars:
+            python_update_json: >-
+              {% set update_list = [] %}
+              {% for res in python_package_version_check.results | default([]) %}
+                {% set installed_ver = (res.stdout_lines | default([]) | select('match', '^Version: ') | list | first | default('') | regex_replace('^Version:\\s*', '') | trim) %}
+                {% set expected_ver = res.item.version | default('') %}
+                {% if res.rc != 0 or installed_ver != expected_ver %}
+                  {% set _ = update_list.append(res.item) %}
+                {% endif %}
+              {% endfor %}
+              {{ update_list | to_json }}
+
+        # Faza 3b: Egzekwowanie wersji PyPI bez mechanizmu apt hold
+        - name: "[Remediacja PyPI] Instalacja docelowych wersji pakietow Python"
+          ansible.builtin.pip:
+            name: "{{ item.name }}=={{ item.version }}"
+            state: present
+            executable: pip3
+          loop: "{{ python_packages_to_update }}"
+          loop_control:
+            label: "{{ item.name }}=={{ item.version }}"
+          when:
+            - not ansible_check_mode
+
+        - name: "[Inspekcja PyPI] Ponowne pobranie wersji pakietow Python"
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -m
+              - pip
+              - show
+              - "{{ item.name }}"
+          register: python_package_version_check_final
+          check_mode: false
+          failed_when: false
+          changed_when: false
+          loop: "{{ python_version_baseline_items | default([]) }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        # Faza 3: Egzekwowanie wersji pakietow oraz zarzadzanie flaga 'hold'
+        - name: "[Remediacja] Egzekwowanie wersji pakietow baseline z pelnym cyklem dpkg hold"
+        # Uzycie bloku block/always gwarantuje, ze niezaleznie od wyniku instalacji,
+        # w sekcji `always` wszystkie pakiety z baseline zostana ponownie
+        # zablokowane flaga `hold` (odpornosc na niezamierzone apt upgrade).
+          block:
+            - name: "[Remediacja 1/2] Zdjecie blokady hold dla pakietow wymagajacych zmiany"
+              ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+              vars:
+                package_guard_packages: "{{ version_baseline_package_specs }}"
+              when: not ansible_check_mode
+
+            - name: "[Remediacja 2/2] Instalacja/aktualizacja docelowych wersji pakietow przez package_guard_apt"
+              ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+              vars:
+                package_guard_packages: "{{ version_baseline_package_specs }}"
+                package_guard_apt_update_cache: true
+              when: not ansible_check_mode
+
+          always:
+            - name: "[Zabezpieczenie] Ponowne ustawienie blokady hold dla pakietow baseline"
+              ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+              vars:
+                package_guard_packages: "{{ version_baseline_package_specs }}"
+              when: not ansible_check_mode
+
+        # Faza 4: Inspekcja koncowa i generowanie raportu
+        - name: "[Inspekcja 2/2] Ponowne pobranie wersji pakietow po wykonaniu remediacji"
+        # Weryfikuje stan faktyczny pakietow w dpkg po zakonczeniu procesu instalacji/aktualizacji.
+          ansible.builtin.command:
+            cmd: "dpkg-query -W -f='${Version}' {{ item.name }}"
+          register: package_version_check_final
+          check_mode: false
+          failed_when: false
+          changed_when: false
+          loop: "{{ version_baseline_items }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: "[Raportowanie] Analiza wynikow i budowanie tresci raportu rozbieznosci"
+        # Porownuje uzyskana wersje z oczekiwana i oznacza kazdy pakiet
+        # etykieta: [ok], [niezgodna wersja] lub [missing].
+          ansible.builtin.set_fact:
+            version_baseline_report_lines: "{{ version_baseline_report_lines | default([]) + [ report_line ] }}"
+          loop: "{{ version_baseline_items }}"
+          vars:
+            current_version: >-
+              {{
+                package_version_check_final.results
+                | selectattr('item.name', 'equalto', item.name)
+                | map(attribute='stdout')
+                | first
+                | default('brak')
+              }}
+            report_line: >-
+              {{ item.name }}: installed={{ current_version }} desired={{ item.version }}
+              {% if current_version == 'brak' %}
+                [missing]
+              {% elif current_version != item.version %}
+                [niezgodna wersja]
+              {% else %}
+                [ok]
+              {% endif %}
+
+        - name: "[Raportowanie PyPI] Dodanie wynikow pakietow Python do raportu"
+          ansible.builtin.set_fact:
+            version_baseline_report_lines: "{{ version_baseline_report_lines | default([]) + [ python_report_line ] }}"
+          loop: "{{ python_version_baseline_items | default([]) }}"
+          vars:
+            current_version: >-
+              {{
+                python_package_version_check_final.results
+                | selectattr('item.name', 'equalto', item.name)
+                | map(attribute='stdout_lines')
+                | first
+                | default([])
+                | select('match', '^Version: ')
+                | list
+                | first
+                | default('brak')
+                | regex_replace('^Version:\\s*', '')
+                | trim
+              }}
+            python_report_line: >-
+              python:{{ item.name }}: installed={{ current_version }} desired={{ item.version }}
+              {% if current_version == 'brak' %}
+                [missing]
+              {% elif current_version != item.version %}
+                [niezgodna wersja]
+              {% else %}
+                [ok]
+              {% endif %}
+
+        - name: "[Raportowanie] Zapisanie koncowego raportu baseline wersji pakietow na kontrolerze"
+        # Zapisuje zebrane dane do pliku tekstowego w reports/version_baseline/<hostname>-version-baseline-report.txt.
+          ansible.builtin.copy:
+            dest: "{{ version_baseline_report_file }}"
+            content: |
+              Baseline wersji pakietow dla hosta: {{ inventory_hostname }}
+              Tryb: {{ ansible_check_mode | ternary('dry run', 'apply') }}
+          
+              {% for line in version_baseline_report_lines %}
+              {{ line }}
+              {% endfor %}
+            mode: "0644"
+          become: false
+          delegate_to: localhost
+          changed_when: false
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: enforce_version_baseline"

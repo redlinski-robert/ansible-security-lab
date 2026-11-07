@@ -1,0 +1,2 @@
+# Specyficzne dla serwerow scanner zmienne.
+ansible_user: __UZUPELNIJ_UZYTKOWNIK_RED__

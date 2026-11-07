@@ -1,0 +1,62 @@
+---
+# package_guard_apt.yml
+#
+# Instalacja jest wymagana, jezeli:
+# - dpkg-query nie zna pakietu,
+# - pakiet nie jest w pelnym stanie "ok installed",
+# - albo dla pakietu przypietego wersja jest inna od oczekiwanej.
+#
+# Sama obecnosc wersji w dpkg NIE oznacza instalacji. Przykladowo:
+#   deinstall ok config-files|1.2.3
+# nadal zawiera numer wersji, ale pakiet nie jest zainstalowany.
+# Dlatego kontrolowany jest jednoczesnie ${Status} i ${Version}.
+
+- name: Sprawdz stan i wersje pakietow przed apt
+  ansible.builtin.command:
+    argv:
+      - dpkg-query
+      - -W
+      - '-f=${Status}|${Version}'
+      - "{{ item.split('=')[0] }}"
+  become: false
+  loop: "{{ package_guard_packages }}"
+  register: package_guard_apt_versions
+  changed_when: false
+  failed_when: false
+
+- name: Domyslnie nie instaluj pakietow przez apt
+  ansible.builtin.set_fact:
+    package_guard_apt_required: false
+  changed_when: false
+
+- name: Ustal czy apt ma instalowac pakiety
+  ansible.builtin.set_fact:
+    package_guard_apt_required: true
+  loop: "{{ package_guard_apt_versions.results }}"
+  loop_control:
+    loop_var: package_guard_apt_result
+    label: "{{ package_guard_apt_result.item }}"
+  when:
+    - not package_guard_apt_required | bool
+    - >-
+      package_guard_apt_result.rc != 0
+      or ' ok installed|' not in (package_guard_apt_result.stdout | default(''))
+      or (
+        package_guard_apt_result.item is search('=')
+        and
+        ((package_guard_apt_result.stdout | default('') | trim).split('|') | last | trim)
+        != package_guard_apt_result.item.split('=')[1]
+      )
+  changed_when: false
+
+- name: Zainstaluj pakiety przez apt jesli wymagaja zmiany
+  ansible.builtin.apt:
+    name: "{{ package_guard_packages }}"
+    state: present
+    update_cache: "{{ package_guard_apt_update_cache | default(true) }}"
+    cache_valid_time: "{{ package_guard_apt_cache_valid_time | default(omit) }}"
+  register: package_guard_apt_status
+  until: package_guard_apt_status is succeeded
+  retries: "{{ package_guard_apt_retries | default(5) }}"
+  delay: "{{ package_guard_apt_delay | default(10) }}"
+  when: package_guard_apt_required | bool

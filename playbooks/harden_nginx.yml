@@ -1,0 +1,675 @@
+﻿---
+- name: Utwardzanie Nginx i wlaczenie OWASP CRS
+  hosts: edge_servers
+  become: true
+  gather_facts: true
+
+  vars:
+    enable_owasp_top10_module: true
+
+    tar_version: "{{ package_versions_effective['tar'] }}"
+    xz_utils_version: "{{ package_versions_effective['xz-utils'] }}"
+    libmodsecurity3_version: "{{ package_versions_effective['libmodsecurity3'] }}"
+
+    # true  = playbook przerwie dzialanie, gdy WAF nie moze zostac skonfigurowany
+    # false = playbook tylko wypisze komunikat i pominie OWASP CRS
+    owasp_crs_required: true
+
+    # On            - blokuje ataki
+    # DetectionOnly - tylko wykrywa i loguje
+    # Off           - wylaczone
+    modsecurity_rule_engine: "On"
+
+    modsecurity_nginx_package: "libnginx-mod-http-modsecurity"
+
+    modsecurity_nginx_arch_map:
+      x86_64: "amd64"
+      aarch64: "arm64"
+
+    # Wyciagniecie architektury procesora
+    modsecurity_nginx_deb_arch: "{{ modsecurity_nginx_arch_map.get(ansible_architecture, '') }}"
+
+    # Fallback dla Ubuntu 22.04 Jammy - zewnetrzny build modulu Nginx ModSecurity z Githuba.
+    # Produkcyjnie lepiej uzyc kontrolowanego repozytorium albo wlasnego builda.
+    modsecurity_nginx_fallback_release_tag: "v1.0.0"
+    modsecurity_nginx_custom_version: "1.0.0+nginx1.18.0"
+
+    modsecurity_nginx_deb_path: "/tmp/libnginx-mod-http-modsecurity-custom_{{ modsecurity_nginx_custom_version }}_{{ modsecurity_nginx_deb_arch }}.deb"
+    modsecurity_nginx_deb_checksum: "sha256:b9eddc3c55bba752e2cb51b956fb99f9a1a67c190d35ff44cfee7185d72c2039"
+    modsecurity_nginx_deb_url: >-
+      https://github.com/redlinski-robert/nginx-1.18.0-modsecurity-module-build/releases/download/{{ modsecurity_nginx_fallback_release_tag }}/libnginx-mod-http-modsecurity-custom_{{ modsecurity_nginx_custom_version | urlencode }}_{{ modsecurity_nginx_deb_arch }}.deb
+    # OWASP CRS
+    owasp_crs_version: "3.3.2"
+    owasp_crs_archive: "/tmp/owasp-crs-{{ owasp_crs_version }}.tar.gz"
+    owasp_crs_url: "https://github.com/coreruleset/coreruleset/archive/refs/tags/v{{ owasp_crs_version }}.tar.gz"
+    owasp_crs_checksum: "sha256:56ddb33a5d0413f43157e1ea22415adf75d8b12219c43156861fd11708c8033e"
+
+    # Celowo pod /etc/nginx/modsecurity, a nie /opt.
+    # Przy profilu AppArmor dla Nginx /opt bedzie blokowany (obecnie nie jest, ale bedzie to poprawione).
+    modsecurity_conf_dir: "/etc/nginx/modsecurity"
+    owasp_crs_dir: "/etc/nginx/modsecurity/owasp-crs"
+    owasp_crs_marker: "{{ owasp_crs_dir }}/.ansible-crs-{{ owasp_crs_version }}"
+    nginx_config_marker: "{{ modsecurity_conf_dir }}/.ansible-nginx-config"
+    nginx_config_fingerprint: >-
+      {{
+        [
+          lookup('file', playbook_dir ~ '/templates/modsecurity.conf.j2'),
+          lookup('file', playbook_dir ~ '/templates/main.conf.j2'),
+          lookup('file', playbook_dir ~ '/templates/00-modsecurity.conf.j2'),
+          lookup('file', playbook_dir ~ '/files/nginx/10-security-headers.conf'),
+          lookup('file', playbook_dir ~ '/files/apparmor-nginx'),
+          modsecurity_rule_engine,
+          owasp_crs_version,
+          owasp_crs_checksum,
+          modsecurity_nginx_custom_version
+        ] | join('\n') | hash('sha256')
+      }}
+
+    # Uprawnienia zgodne z permission_baseline_edge (inventories/group_vars/edge_servers/20_permissions.yml)
+    nginx_conf_file_mode: "0644"
+    nginx_conf_d_dir_mode: "0755"
+    nginx_modules_enabled_dir_mode: "0755"
+    nginx_modules_enabled_dir_owner: "{{ nginx_owner }}"
+    nginx_modules_enabled_dir_group: "{{ nginx_group }}"
+    nginx_modsecurity_loader_conf_mode: "0644"
+    modsecurity_conf_dir_mode: "0750"
+    owasp_crs_dir_mode: "0750"
+    nginx_owasp_crs_setup_conf_mode: "0640"
+    nginx_cache_dir_mode: "0750"
+    nginx_runtime_log_file_mode: "0640"
+    nginx_modsecurity_conf_file_mode: "0640"
+    nginx_apparmor_profile_mode: "0644"
+
+    modsecurity_engine_conf: "/etc/nginx/modsecurity/modsecurity.conf"
+    modsecurity_main_conf: "/etc/nginx/modsecurity/main.conf"
+
+    modsecurity_unicode_mapping: "/etc/nginx/modsecurity/unicode.mapping"
+    modsecurity_unicode_mapping_url: "https://raw.githubusercontent.com/owasp-modsecurity/ModSecurity/662fe63a47d012b89175ea7da5be1a8f7e76014c/unicode.mapping"
+    modsecurity_unicode_mapping_checksum: "sha256:5e4500ef82e45c49d8edd9513648939710d6c8cc2d5997513b32866dc5d9be23"
+
+    # Nginx
+    nginx_conf_d_dir: "/etc/nginx/conf.d"
+    nginx_modsecurity_global_conf: "{{ nginx_conf_d_dir }}/00-modsecurity.conf"
+    nginx_modsecurity_module_path: "/usr/lib/nginx/modules/ngx_http_modsecurity_module.so"
+    nginx_modsecurity_loader_conf: "/etc/nginx/modules-enabled/50-mod-http-modsecurity.conf"
+
+    # Globalne naglowki bezpieczenstwa HTTP dla Nginx
+    nginx_security_headers_enabled: true
+    nginx_security_headers_conf: "{{ nginx_conf_d_dir }}/10-security-headers.conf"
+
+  pre_tasks:
+    # Modul ModSecurity jest pobierany z APT, a dla obslugiwanej konfiguracji
+    # moze byc uzyty pakiet awaryjny. Tryb wymagania modulu decyduje, czy
+    # brak dostepnego modulu przerwie przebieg.
+    - name: Sprawdzenie poprawnosci trybu ModSecurity
+      ansible.builtin.assert:
+        that:
+          - modsecurity_rule_engine in ["On", "Off", "DetectionOnly"]
+        fail_msg: "modsecurity_rule_engine musi miec wartosc: On, Off albo DetectionOnly."
+      when: enable_owasp_top10_module | bool
+
+  tasks:
+    - name: Zdejmij blokade hold dla pakietow bazowych ModSecurity
+      ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+      vars:
+        package_guard_packages:
+          - "tar={{ tar_version }}"
+          - "xz-utils={{ xz_utils_version }}"
+          - "libmodsecurity3={{ libmodsecurity3_version }}"
+      when: enable_owasp_top10_module | bool
+
+    - name: Zdejmij blokade hold dla pakietu modulu Nginx ModSecurity
+      ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+      vars:
+        package_guard_packages:
+          - "{{ modsecurity_nginx_package }}"
+      when: enable_owasp_top10_module | bool
+
+    - name: Instalacja podstawowych pakietow przez package_guard_apt
+      ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+      vars:
+        package_guard_packages:
+          - "tar={{ tar_version }}"
+          - "xz-utils={{ xz_utils_version }}"
+          - "libmodsecurity3={{ libmodsecurity3_version }}"
+        package_guard_apt_update_cache: true
+      when: enable_owasp_top10_module | bool
+
+    # przykladowy output dla apt-cache policy libnginx-mod-http-modsecurity:
+    # libnginx-mod-http-modsecurity:
+    #  Installed: 1.18.0-6ubuntu14.7+connector104
+    #  Candidate: 1.18.0-6ubuntu14.7+connector104
+    #  Version table:
+    # *** 1.18.0-6ubuntu14.7+connector104 100
+    #        100 /var/lib/dpkg/status
+
+    - name: Sprawdzenie dostepnosci pakietu Nginx ModSecurity w APT
+      ansible.builtin.command: "apt-cache policy {{ modsecurity_nginx_package }}"
+      register: modsecurity_nginx_policy
+      changed_when: false
+      failed_when: false
+      when: enable_owasp_top10_module | bool
+
+    # Ustawia modsecyrity_nginx_available na true, gdy Candidate jest dostepny i nie jest (none)
+    - name: Ustawienie informacji o dostepnosci pakietu Nginx ModSecurity
+      ansible.builtin.set_fact:
+        modsecurity_nginx_available: >-
+          {{
+            'Candidate:' in modsecurity_nginx_policy.stdout
+            and 'Candidate: (none)' not in modsecurity_nginx_policy.stdout
+          }}
+      when: enable_owasp_top10_module | bool
+
+    - name: Instalacja modulu Nginx ModSecurity przez package_guard_apt
+      ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+      vars:
+        package_guard_packages:
+          - "{{ modsecurity_nginx_package }}"
+        package_guard_apt_update_cache: true
+      when:
+        - enable_owasp_top10_module | bool
+        - modsecurity_nginx_available | default(false) | bool
+
+    # force: true zmusza do pobrania pliku od nowa (na wypadek problemow z niepobranym do konca plikiem)
+    - name: Fallback - instalacja modulu Nginx ModSecurity dla Ubuntu 22.04 Jammy
+      block:
+        - name: Pobranie paczki .deb z modulem Nginx ModSecurity
+          ansible.builtin.get_url:
+            url: "{{ modsecurity_nginx_deb_url }}"
+            dest: "{{ modsecurity_nginx_deb_path }}"
+            mode: "{{ nginx_conf_file_mode }}"
+            force: true
+            checksum: "{{ modsecurity_nginx_deb_checksum }}"
+
+        - name: Instalacja pobranej paczki .deb z modulem Nginx ModSecurity
+          ansible.builtin.apt:
+            deb: "{{ modsecurity_nginx_deb_path }}"
+
+      rescue:
+        - name: Przerwanie po nieudanym fallbacku instalacji modulu ModSecurity
+          ansible.builtin.fail:
+            msg: >-
+              Nie udalo sie zainstalowac {{ modsecurity_nginx_package }}
+              z fallbackowego pliku .deb. Sprawdz: nginx -v oraz apt-cache policy nginx.
+          when: owasp_crs_required | bool
+
+        - name: Pominiecie fallbacku po nieudanej instalacji
+          ansible.builtin.debug:
+            msg: >-
+              Nie udalo sie zainstalowac {{ modsecurity_nginx_package }}
+              z fallbackowego .deb. OWASP CRS zostanie pominiety.
+          when: not (owasp_crs_required | bool)
+
+      when:
+        - enable_owasp_top10_module | bool
+        - not (modsecurity_nginx_available | default(false) | bool)
+        # Dane z gather_fact
+        - ansible_distribution == "Ubuntu"
+        - ansible_distribution_version is version("22.04", "==")
+        - modsecurity_nginx_deb_arch | length > 0
+
+    - name: Konfiguracja ModSecurity i OWASP CRS lub pominiecie, gdy modul nie jest dostepny i nie jest wymagany
+      block:
+        - name: Sprawdzenie, czy plik modulu ModSecurity dla Nginx istnieje
+          ansible.builtin.stat:
+            path: "{{ nginx_modsecurity_module_path }}"
+          register: nginx_modsecurity_module_stat
+          when: enable_owasp_top10_module | bool
+
+        - name: Przerwanie, gdy modul Nginx ModSecurity nadal nie istnieje
+          ansible.builtin.fail:
+            msg: >-
+              Nie znaleziono {{ nginx_modsecurity_module_path }}.
+              Nie mozna wlaczyc OWASP CRS bez modulu Nginx ModSecurity.
+          when:
+            - enable_owasp_top10_module | bool
+            - owasp_crs_required | bool
+            - not (nginx_modsecurity_module_stat.stat.exists | default(false) | bool)
+
+        - name: Pominiecie OWASP CRS, gdy brakuje modulu Nginx ModSecurity
+          ansible.builtin.debug:
+            msg: >-
+              Pomijam ModSecurity/OWASP CRS: pakiet {{ modsecurity_nginx_package }}
+              nie jest dostepny albo modul nie zostal poprawnie zainstalowany.
+          when:
+            - enable_owasp_top10_module | bool
+            - not (owasp_crs_required | bool)
+            - not (nginx_modsecurity_module_stat.stat.exists | default(false) | bool)
+
+        - name: Sprawdzenie odcisku wdrozonej konfiguracji Nginx
+          ansible.builtin.stat:
+            path: "{{ nginx_config_marker }}"
+          register: nginx_config_marker_stat
+          when: enable_owasp_top10_module | bool
+
+        - name: Odczytanie odcisku wdrozonej konfiguracji Nginx
+          ansible.builtin.slurp:
+            src: "{{ nginx_config_marker }}"
+          register: nginx_config_marker_content
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_config_marker_stat.stat.exists | bool
+
+        - name: Ustalenie, czy trzeba wyczyscic konfiguracje Nginx
+          ansible.builtin.set_fact:
+            nginx_rebuild_required: >-
+              {{
+                not (nginx_config_marker_stat.stat.exists | bool)
+                or
+                (
+                  (nginx_config_marker_content.content | default('') | b64decode | trim)
+                  != nginx_config_fingerprint
+                )
+              }}
+          when: enable_owasp_top10_module | bool
+
+        - name: Usuniecie starej konfiguracji przed ponownym wdrozeniem
+          # Celowo czyscimy artefakty, gdy zmienil sie plik zrodlowy lub wersja.
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ modsecurity_conf_dir }}"
+            - "{{ nginx_modsecurity_loader_conf }}"
+            - "{{ nginx_security_headers_conf }}"
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_rebuild_required | bool
+          notify:
+            - Restart Nginx po zmianie konfiguracji
+
+        - name: Utworzenie katalogu modules-enabled dla Nginx
+          ansible.builtin.file:
+            path: "{{ nginx_modules_enabled_dir }}"
+            state: directory
+            mode: "{{ nginx_modules_enabled_dir_mode }}"
+            owner: "{{ nginx_modules_enabled_dir_owner }}"
+            group: "{{ nginx_modules_enabled_dir_group }}"
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Sprawdzenie, czy modul ModSecurity jest juz ladowany przez Nginx
+          ansible.builtin.shell: |
+            set -o pipefail
+            if grep -Rqs "ngx_http_modsecurity_module\.so" /etc/nginx/modules-enabled /etc/nginx/nginx.conf; then
+              echo "present"
+            else
+              echo "absent"
+            fi
+          args:
+            executable: /bin/bash
+          register: modsecurity_loader_state
+          changed_when: false
+          failed_when: false
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Dodanie ladowania dynamicznego modulu ModSecurity do Nginx
+          ansible.builtin.copy:
+            dest: "{{ nginx_modsecurity_loader_conf }}"
+            mode: "{{ nginx_modsecurity_loader_conf_mode }}"
+            content: |
+              load_module modules/ngx_http_modsecurity_module.so;
+          notify:
+            - Restart Nginx po zmianie konfiguracji
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+            - modsecurity_loader_state.stdout | default('absent') == "absent"
+
+        - name: Utworzenie katalogu konfiguracji ModSecurity
+          ansible.builtin.file:
+            path: "{{ modsecurity_conf_dir }}"
+            state: directory
+            mode: "{{ modsecurity_conf_dir_mode }}"
+            owner: "{{ nginx_owner }}"
+            group: "{{ nginx_group }}"
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        # Marker pozwala porownac wdrozona wersje regul CRS z docelowa.
+        # Zmiana wersji powoduje odtworzenie katalogu z pobranego archiwum.
+        - name: Sprawdzenie markera wersji OWASP CRS
+          ansible.builtin.stat:
+            path: "{{ owasp_crs_marker }}"
+          register: owasp_crs_marker_stat
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Odczytanie markera zawartosci OWASP CRS
+          ansible.builtin.slurp:
+            src: "{{ owasp_crs_marker }}"
+          register: owasp_crs_marker_content
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+            - owasp_crs_marker_stat.stat.exists | default(false) | bool
+
+        - name: Usuniecie starego katalogu CRS przy zmianie wersji
+          # Czyscimy rozpakowane artefakty CRS, aby nie zostaly osierocone reguly.
+          ansible.builtin.file:
+            path: "{{ owasp_crs_dir }}"
+            state: absent
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+            - >-
+              not (owasp_crs_marker_stat.stat.exists | default(false) | bool)
+              or
+              (
+                (owasp_crs_marker_content.content | default('') | b64decode | trim)
+                != (owasp_crs_version ~ '|' ~ owasp_crs_checksum)
+              )
+
+        - name: Utworzenie katalogu OWASP CRS pod /etc/nginx/modsecurity
+          ansible.builtin.file:
+            path: "{{ owasp_crs_dir }}"
+            state: directory
+            owner: "{{ nginx_owner }}"
+            group: "{{ nginx_group }}"
+            mode: "{{ owasp_crs_dir_mode }}"
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Pobranie archiwum OWASP CRS
+          ansible.builtin.get_url:
+            url: "{{ owasp_crs_url }}"
+            dest: "{{ owasp_crs_archive }}"
+            mode: "{{ nginx_conf_file_mode }}"
+            force: true
+            checksum: "{{ owasp_crs_checksum }}"
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Rozpakowanie OWASP CRS bezposrednio do katalogu Nginx ModSecurity
+          ansible.builtin.unarchive:
+            src: "{{ owasp_crs_archive }}"
+            dest: "{{ owasp_crs_dir }}"
+            remote_src: true
+            extra_opts:
+              - --strip-components=1
+            creates: "{{ owasp_crs_marker }}"
+          notify:
+            - Restart Nginx po zmianie konfiguracji
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Oznacz zainstalowana wersje OWASP CRS
+          ansible.builtin.copy:
+            content: "{{ owasp_crs_version }}|{{ owasp_crs_checksum }}\n"
+            dest: "{{ owasp_crs_marker }}"
+            owner: "{{ nginx_owner }}"
+            group: "{{ nginx_group }}"
+            mode: "0640"
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Sprawdzenie, czy istnieje crs-setup.conf.example
+          ansible.builtin.stat:
+            path: "{{ owasp_crs_dir }}/crs-setup.conf.example"
+          register: crs_setup_example_stat
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Przerwanie, gdy brakuje crs-setup.conf.example
+          ansible.builtin.fail:
+            msg: "Nie znaleziono {{ owasp_crs_dir }}/crs-setup.conf.example po rozpakowaniu OWASP CRS."
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+            - not (crs_setup_example_stat.stat.exists | default(false) | bool)
+
+        - name: Utworzenie crs-setup.conf z pliku przykladowego
+          ansible.builtin.copy:
+            src: "{{ owasp_crs_dir }}/crs-setup.conf.example"
+            dest: "{{ owasp_crs_dir }}/crs-setup.conf"
+            remote_src: true
+            force: true
+            mode: "{{ nginx_owasp_crs_setup_conf_mode }}"
+          notify:
+            - Restart Nginx po zmianie konfiguracji
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Sprawdzenie, czy crs-setup.conf istnieje
+          ansible.builtin.stat:
+            path: "{{ owasp_crs_dir }}/crs-setup.conf"
+          register: crs_setup_conf_stat
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Przerwanie, gdy nadal brakuje crs-setup.conf
+          ansible.builtin.fail:
+            msg: "Brakuje {{ owasp_crs_dir }}/crs-setup.conf. Nie uruchamiam nginx -t, bo konfiguracja WAF jest niekompletna."
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+            - not (crs_setup_conf_stat.stat.exists | default(false) | bool)
+
+        - name: Utworzenie katalogow cache ModSecurity
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            owner: "{{ nginx_runtime_user }}"
+            group: "{{ nginx_runtime_user }}"
+            mode: "{{ nginx_cache_dir_mode }}"
+          loop:
+            - /var/cache/modsecurity
+            - /var/cache/modsecurity/upload
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Sprawdzenie plikow logow ModSecurity
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - /var/log/nginx/modsec_audit.log
+            - /var/log/nginx/modsec_debug.log
+          register: modsecurity_log_stats
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Utworzenie brakujacych plikow logow ModSecurity
+          ansible.builtin.file:
+            path: "{{ item.item }}"
+            state: touch
+            owner: "{{ nginx_runtime_user }}"
+            group: "{{ nginx_log_group }}"
+            mode: "{{ nginx_runtime_log_file_mode }}"
+          loop: "{{ modsecurity_log_stats.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+            - not item.stat.exists
+
+        - name: Ustaw uprawnienia plikow logow ModSecurity
+          ansible.builtin.file:
+            path: "{{ item.item }}"
+            state: file
+            owner: "{{ nginx_runtime_user }}"
+            group: "{{ nginx_log_group }}"
+            mode: "{{ nginx_runtime_log_file_mode }}"
+          loop: "{{ modsecurity_log_stats.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+        - name: Pobranie unicode.mapping dla ModSecurity
+          ansible.builtin.get_url:
+            url: "{{ modsecurity_unicode_mapping_url }}"
+            dest: "{{ modsecurity_unicode_mapping }}"
+            owner: "{{ nginx_owner }}"
+            group: "{{ nginx_group }}"
+            mode: "{{ permission_baseline_edge | selectattr('path','equalto', modsecurity_unicode_mapping) | map(attribute='mode') | list | first | default('0644') }}"
+            force: true
+            checksum: "{{ modsecurity_unicode_mapping_checksum }}"
+          notify:
+            - Restart Nginx po zmianie konfiguracji
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Utworzenie glownej konfiguracji silnika ModSecurity
+          # template atomowo nadpisuje zmieniona konfiguracje bez chwilowej pustki.
+          ansible.builtin.template:
+            src: "templates/modsecurity.conf.j2"
+            dest: "{{ modsecurity_engine_conf }}"
+            mode: "{{ nginx_modsecurity_conf_file_mode }}"
+          notify:
+            - Restart Nginx po zmianie konfiguracji
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Utworzenie pliku main.conf dla ModSecurity i OWASP CRS
+          # Zmiana tresci powoduje restart dopiero po pozytywnym nginx -t.
+          ansible.builtin.template:
+            src: "templates/main.conf.j2"
+            dest: "{{ modsecurity_main_conf }}"
+            mode: "{{ nginx_modsecurity_conf_file_mode }}"
+          notify:
+            - Restart Nginx po zmianie konfiguracji
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Globalne wlaczenie ModSecurity dla Nginx
+          # Zmieniona tresc powoduje restart dopiero po pozytywnym nginx -t.
+          ansible.builtin.template:
+            src: "templates/00-modsecurity.conf.j2"
+            dest: "{{ nginx_modsecurity_global_conf }}"
+            mode: "{{ nginx_conf_file_mode }}"
+          notify:
+            - Restart Nginx po zmianie konfiguracji
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        - name: Utworzenie katalogu conf.d dla Nginx
+          ansible.builtin.file:
+            path: "{{ nginx_conf_d_dir }}"
+            state: directory
+            owner: "{{ nginx_owner }}"
+            group: "{{ nginx_group }}"
+            mode: "{{ nginx_conf_d_dir_mode }}"
+          when: nginx_security_headers_enabled | bool
+
+        - name: Globalne dodanie bazowych naglowkow bezpieczenstwa dla Nginx
+          # Zmiana naglowkow wdraza konfiguracje i restartuje Nginx po nginx -t.
+          ansible.builtin.copy:
+            src: "files/nginx/10-security-headers.conf"
+            dest: "{{ nginx_security_headers_conf }}"
+            owner: "{{ nginx_owner }}"
+            group: "{{ nginx_group }}"
+            mode: "{{ nginx_conf_file_mode }}"
+          notify:
+            - Restart Nginx po zmianie konfiguracji
+          when: nginx_security_headers_enabled | bool
+
+        - name: Przeslij profil AppArmor z plikow lokalnych
+          ansible.builtin.copy:
+            src: files/apparmor-nginx
+            dest: "{{ nginx_apparmor_profile }}"
+            owner: "{{ nginx_owner }}"
+            group: "{{ nginx_group }}"
+            mode: "{{ nginx_apparmor_profile_mode }}"
+          notify:
+            - Przeladuj profil AppArmor dla Nginx
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+
+        # Przed wykonaniem oczekujacych handlerow sprawdzana jest skladnia
+        # Nginx. Dopiero poprawna konfiguracja otrzymuje marker wdrozenia.
+        - name: Test konfiguracji Nginx po zmianach hardeningowych
+          ansible.builtin.command: nginx -t
+          register: nginx_config_test
+          changed_when: false
+          when:
+            - >-
+              (nginx_security_headers_enabled | bool)
+              or
+              (
+                enable_owasp_top10_module | bool
+                and nginx_modsecurity_module_stat is defined
+                and nginx_modsecurity_module_stat.stat.exists | default(false) | bool
+              )
+
+        - name: Wykonaj oczekujace handlery Nginx po poprawnym tescie konfiguracji
+          ansible.builtin.meta: flush_handlers
+
+        - name: Zapisz odcisk wdrozonej konfiguracji Nginx
+          ansible.builtin.copy:
+            content: "{{ nginx_config_fingerprint }}\n"
+            dest: "{{ nginx_config_marker }}"
+            owner: "{{ nginx_owner }}"
+            group: "{{ nginx_group }}"
+            mode: "0640"
+          when:
+            - enable_owasp_top10_module | bool
+            - nginx_rebuild_required | bool
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+          vars:
+            rescue_fail_message: "Hardenowanie Nginx/ModSecurity nie zostalo zakonczone poprawnie. Sprawdz komunikaty powyzej."
+
+      always:
+        - name: Ustaw blokade hold dla pakietow bazowych ModSecurity
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages:
+              - "tar={{ tar_version }}"
+              - "xz-utils={{ xz_utils_version }}"
+              - "libmodsecurity3={{ libmodsecurity3_version }}"
+          when: enable_owasp_top10_module | bool
+
+        - name: Ustaw blokade hold dla pakietu modulu Nginx ModSecurity
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages:
+              - "{{ modsecurity_nginx_package }}"
+          when:
+            - enable_owasp_top10_module | bool
+            - modsecurity_nginx_available | default(false) | bool
+
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: harden_nginx_modsecurity"
+  handlers:
+    - name: Restart Nginx po zmianie konfiguracji
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+        enabled: true
+
+    - name: Przeladuj profil AppArmor dla Nginx
+      ansible.builtin.command: apparmor_parser -r /etc/apparmor.d/usr.sbin.nginx
+      changed_when: false
+
+
+
+
+
+
+
+
+

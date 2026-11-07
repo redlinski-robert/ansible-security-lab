@@ -1,0 +1,13 @@
+---
+# Aplikacja (flask + vue.js + redis)
+app_frontend_dir: "{{ app_dir }}/frontend/"
+app_backend_dir: "{{ app_dir }}/backend/"
+app_docker_compose: "{{ app_dir }}/docker-compose.yml"
+app_dir: /var/opt/fullstack-app
+
+# Docker
+docker_config_dir: /etc/docker
+docker_daemon_config_file: "{{ docker_config_dir }}/daemon.json"
+docker_audit_rules_file: /etc/audit/rules.d/docker.rules
+docker_authz_policy_dir: "/etc/docker/policies"
+docker_authz_policy_file: "/etc/docker/policies/authz.rego"

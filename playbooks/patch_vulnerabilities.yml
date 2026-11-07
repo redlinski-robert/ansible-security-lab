@@ -1,0 +1,73 @@
+﻿---
+- name: Naprawa wybranych podatnosci
+  hosts: blue_group
+  become: yes
+  vars:
+    # Mozna sprawdzic obecna wersje dpkg -l policykit-1 vim vim-common vim-runtime
+    vim_packages:
+      - "vim={{ package_versions_effective['vim'] }}"
+      - "vim-common={{ package_versions_effective['vim-common'] }}"
+      - "vim-runtime={{ package_versions_effective['vim-runtime'] }}"
+
+    policykit: "policykit-1={{ package_versions_effective['policykit-1'] }}"
+    patch_vulnerability_packages: "{{ vim_packages + [policykit] }}"
+
+  tasks:
+      - name: Sprawdz zainstalowane wersje pakietow latanych
+        ansible.builtin.command:
+          argv:
+            - dpkg-query
+            - -W
+            - -f=${Version}
+            - "{{ item.split('=')[0] }}"
+        loop: "{{ patch_vulnerability_packages }}"
+        register: package_guard_versions
+        changed_when: false
+        failed_when: false
+
+      - name: Latanie podatnosci
+        block:
+          - name: Zdejmij blokade hold dla pakietow wymagajacych zmiany
+            ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+            vars:
+              package_guard_packages: "{{ patch_vulnerability_packages }}"
+
+          # Ten playbook dotyczy wybranych pakietow, nie pelnego upgrade'u
+          # systemu. Docelowe wersje sa pobierane z inventory.
+          - name: Odswiezenie listy pakietow (bez aktualizacji wszystkiego)
+            apt:
+              update_cache: yes
+              cache_valid_time: 3600
+
+          - name: Aktualizacja polkit (naprawia pkexec)
+            ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+            vars:
+              package_guard_packages:
+                - "{{ policykit }}"
+              package_guard_apt_update_cache: true
+              package_guard_apt_retries: 5
+              package_guard_apt_delay: 10
+
+          - name: Aktualizacja vim (naprawia luki w edytorze)
+            ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+            vars:
+              package_guard_packages: "{{ vim_packages }}"
+              package_guard_apt_update_cache: true
+              package_guard_apt_retries: 5
+              package_guard_apt_delay: 10
+            
+        rescue:
+          - name: Dolacz wspolna obsluge bledu
+            ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+        always:
+          # Blokada hold uniemozliwia przypadkowy upgrade zaleznosci i komponentow za pomoca apt upgrade
+          - name: Ustaw blokade hold dla pakietow
+            ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+            vars:
+              package_guard_packages: "{{ patch_vulnerability_packages }}"
+
+          - name: Dolacz wspolne taski etckeeper
+            ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+            vars:
+              etckeeper_commit_message: "Ansible: patch_vulnerabilities"

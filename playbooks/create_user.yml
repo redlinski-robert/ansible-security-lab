@@ -1,0 +1,199 @@
+﻿---
+- name: Utworz uzytkownika lub grupe (aktualizacja w inventory dla uzytkownika Ansible)
+  # user_target wskazuje zakres migracji: nazwe grupy albo pojedynczego hosta.
+  # Dla grupy post_tasks aktualizuje group_vars/<user_target>/vars.yml,
+  # a dla hosta host_vars/<user_target>/vars.yml.
+  # --limit ogranicza wykonanie zadan, ale nie ustawia user_target.
+  hosts: "{{ user_target | default('all') }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  vars:
+    username: ansible
+    groupname: ansible
+
+    # Metoda nadawania sudo dla nowego uzytkownika:
+    # group - dodanie uzytkownika do grupy sudo
+    # sudoers_user - utworzenie pliku /etc/sudoers.d/<username>-user z wpisem dla uzytkownika
+    # sudoers_group - utworzenie pliku /etc/sudoers.d/<groupname>-group z wpisem dla grupy
+    # none - brak nadawania sudo 
+    # dla usera ansible, ktory ma byc uzywany w inventory, najlepiej ustawic sudo_access_method: "sudoers_user"
+    sudo_access_method: "none"
+
+    # Umozliwia dodanie usera do juz utworzonej sudo grupy
+    sudo_system_group: sudo
+
+    # Po ustawieniu true playbook skopiuje authorized_keys starego uzytkownika
+    # i zaktualizuje ansible_user w odpowiednich plikach vars.yml
+    change_ansible_user: false
+    old_ansible_user: null
+
+    old_ansible_user_is_set: >-
+      {{ old_ansible_user | default('', true) | string | trim | length > 0 }}
+
+    sudoers_user_file: "/etc/sudoers.d/{{ username }}-user"
+    sudoers_group_file: "/etc/sudoers.d/{{ groupname }}-group"
+
+    # Katalog inventory, przy ktorym leza group_vars i host_vars
+    inventory_vars_root: "{{ inventory_dir }}"
+
+    # Nazwa pliku zmiennych w group_vars/<grupa>/ oraz host_vars/<host>/
+    inventory_vars_file: vars.yml
+
+    # Zmienne, ktore maja zostac zapisane po udanej migracji usera Ansible
+    inventory_user_vars:
+      ansible_user: "{{ username }}"
+
+  tasks:
+    - name: Utworz grupe lub uzytkownika
+      block:
+        - name: Sprawdz poprawnosc konfiguracji uzytkownika
+          ansible.builtin.assert:
+            that:
+              - sudo_access_method in ['group', 'sudoers_user', 'sudoers_group', 'none']
+              - change_ansible_user is boolean
+              - not change_ansible_user or old_ansible_user_is_set
+              - not change_ansible_user or old_ansible_user != username
+            fail_msg: >-
+              Niepoprawna konfiguracja: sudo_access_method musi miec wartosc group,
+              sudoers_user, sudoers_group albo none; change_ansible_user musi byc
+              wartoscia boolean, a po ustawieniu true wymaga niepustego
+              old_ansible_user roznego od username.
+
+        - name: Upewnij sie, ze grupa uzytkownika istnieje
+          ansible.builtin.group:
+            name: "{{ groupname }}"
+            state: present
+
+        - name: Utworz uzytkownika bez nadawania sudo
+          ansible.builtin.user:
+            name: "{{ username }}"
+            group: "{{ groupname }}"
+            shell: /bin/bash
+            home: "/home/{{ username }}"
+            create_home: true
+            state: present
+
+        - name: Utworz katalog .ssh
+          ansible.builtin.file:
+            path: "/home/{{ username }}/.ssh"
+            state: directory
+            owner: "{{ username }}"
+            group: "{{ groupname }}"
+            mode: "0700"
+
+        # Przy migracji kopiujemy klucze z hosta zdalnego (remote_src), aby
+        # nowe konto moglo uzywac dotychczasowego uwierzytelniania SSH.
+        - name: Sprawdz, czy istnieje authorized_keys starego uzytkownika
+          ansible.builtin.stat:
+            path: "/home/{{ old_ansible_user }}/.ssh/authorized_keys"
+          register: old_authorized_keys
+          when:
+            - change_ansible_user
+            - old_ansible_user_is_set
+
+        - name: Skopiuj authorized_keys ze starego uzytkownika
+          ansible.builtin.copy:
+            src: "/home/{{ old_ansible_user }}/.ssh/authorized_keys"
+            dest: "/home/{{ username }}/.ssh/authorized_keys"
+            remote_src: true
+            owner: "{{ username }}"
+            group: "{{ groupname }}"
+            mode: "0600"
+          when:
+            - change_ansible_user
+            - old_ansible_user_is_set
+            - old_authorized_keys.stat.exists | default(false)
+
+        - name: Upewnij sie, ze systemowa grupa sudo istnieje
+          ansible.builtin.group:
+            name: "{{ sudo_system_group }}"
+            state: present
+          when: sudo_access_method == "group"
+
+        - name: Dodaj uzytkownika do grupy sudo
+          ansible.builtin.user:
+            name: "{{ username }}"
+            groups: "{{ sudo_system_group }}"
+            append: true
+          when: sudo_access_method == "group"
+
+        - name: Dodaj sudoers dla konkretnego uzytkownika
+          ansible.builtin.copy:
+            dest: "{{ sudoers_user_file }}"
+            content: "{{ username }} ALL=(ALL) NOPASSWD:ALL\n"
+            owner: root
+            group: root
+            mode: "0440"
+            validate: "visudo -cf %s"
+          when: sudo_access_method == "sudoers_user"
+
+        - name: Dodaj sudoers dla grupy uzytkownika
+          ansible.builtin.copy:
+            dest: "{{ sudoers_group_file }}"
+            content: "%{{ groupname }} ALL=(ALL) NOPASSWD:ALL\n"
+            owner: root
+            group: root
+            mode: "0440"
+            validate: "visudo -cf %s"
+          when: sudo_access_method == "sudoers_group"
+
+        - name: Usun sudoers uzytkownika, jesli metoda nie jest sudoers_user
+          ansible.builtin.file:
+            path: "{{ sudoers_user_file }}"
+            state: absent
+          when: sudo_access_method != "sudoers_user"
+
+        - name: Usun sudoers grupy, jesli metoda nie jest sudoers_group
+          ansible.builtin.file:
+            path: "{{ sudoers_group_file }}"
+            state: absent
+          when: sudo_access_method != "sudoers_group"
+
+        - name: Sprawdz grupy uzytkownika
+          ansible.builtin.command: "id -nG {{ username }}"
+          register: user_groups
+          changed_when: false
+          failed_when: false
+
+        - name: Usun uzytkownika z grupy sudo, jesli sudo nie ma byc przez grupe
+          ansible.builtin.command: "gpasswd -d {{ username }} {{ sudo_system_group }}"
+          when:
+            - sudo_access_method != "group"
+            - user_groups.rc == 0
+            - sudo_system_group in user_groups.stdout.split()
+          register: remove_from_sudo_group
+          changed_when: remove_from_sudo_group.rc == 0
+          failed_when:
+            - remove_from_sudo_group.rc != 0
+            - "'is not a member' not in remove_from_sudo_group.stderr"
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+          vars:
+            rescue_error_message: "Blad w zadaniu '{{ ansible_failed_task.name | default('nieznany task') }}': {{ ansible_failed_result.msg | default(ansible_failed_result.stderr, true) | default('brak szczegolow', true) }}. Pliki vars nie zostana zaktualizowane."
+            rescue_fail_message: "Tworzenie uzytkownika lub konfiguracja sudo nie zakonczyly sie poprawnie (zadanie: '{{ ansible_failed_task.name | default('nieznany task') }}')."
+
+      always:
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: create_user"
+  post_tasks:
+    # Po udanej migracji wspolne zadania zmieniaja odpowiednie pliki inventory
+    # na kontrolerze i usuwaja kolidujace nadpisania nizszego poziomu.
+    - name: Zaktualizuj ansible_user przez wspolny interfejs inventory
+      ansible.builtin.include_tasks: tasks/update_inventory_variable.yml
+      vars:
+        inventory_update_target_input: "{{ user_target | default('all') }}"
+        inventory_update_variable: ansible_user
+        inventory_update_values: "{{ inventory_user_vars }}"
+      when:
+        - change_ansible_user
+        - old_ansible_user_is_set
+        - old_ansible_user != username
+
+
+

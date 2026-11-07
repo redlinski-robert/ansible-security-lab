@@ -1,0 +1,70 @@
+#include <tunables/global>
+
+# Profil procesu Nginx z obsluga TLS, reverse proxy i ModSecurity.
+profile apparmor-nginx /usr/sbin/nginx {
+  # Podstawowe operacje systemowe i rozpoznawanie nazw hostow.
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  capability net_bind_service,
+  capability setgid,
+  capability setuid,
+  capability dac_override,
+  capability dac_read_search,
+
+  # Glowny binarny plik Nginx
+  /usr/sbin/nginx mr,
+
+  # Konfiguracja Nginx, ModSecurity i OWASP CRS
+  /etc/nginx/** r,
+
+  # Dynamiczne moduly Nginx
+  /usr/lib/nginx/modules/*.so mr,
+  /usr/share/nginx/modules-available/*.conf r,
+
+  # Biblioteki systemowe - zwykle pokrywa je abstractions/base,
+  # ale przy problemach z modulami mozna zostawic jawnie.
+  /lib/** mr,
+  /lib64/** mr,
+  /usr/lib/** mr,
+
+  # SSL / certyfikaty
+  /etc/ssl/** r,
+  /etc/letsencrypt/** r,
+
+  # Logi Nginx i ModSecurity
+  /var/log/nginx/ rw,
+  /var/log/nginx/** rwk,
+  /var/log/nginx/error.log rwk,
+  /var/log/nginx/access.log rwk,
+  /var/log/nginx/modsec_audit.log rwk,
+  /var/log/nginx/modsec_debug.log rwk,
+
+  # Pliki runtime Nginx
+  /run/nginx.pid rw,
+  /run/nginx.pid.oldbin rw,
+  /run/nginx/ rw,
+  /run/nginx/** rw,
+
+  # Cache / temp Nginx
+  /var/lib/nginx/ rw,
+  /var/lib/nginx/** rwk,
+  /var/cache/nginx/ rw,
+  /var/cache/nginx/** rwk,
+
+  # Cache / upload / dane ModSecurity
+  /var/cache/modsecurity/ rw,
+  /var/cache/modsecurity/** rwk,
+
+  # Tymczasowe pliki ModSecurity, jesli w modsecurity.conf masz SecTmpDir /tmp/
+  /tmp/ r,
+  /tmp/** rwk,
+
+  # Jezeli Nginx serwuje pliki statyczne
+  /var/www/ r,
+  /var/www/** r,
+
+  # Siec - HTTP/HTTPS oraz reverse proxy do backendu
+  network inet stream,
+  network inet6 stream,
+}

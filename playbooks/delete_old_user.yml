@@ -1,0 +1,91 @@
+﻿---
+- name: Usuniecie starego uzytkownika
+  hosts: "{{ user_target | default('all') }}"
+  become: true
+  gather_facts: false
+  vars:
+    old_user: "__UZUPELNIJ_UZYTKOWNIK_BLUE__"
+    force_delete_user_sudoers_files: true
+  tasks:
+    - name: Usuniecie uzytkownika
+      block:
+        # Przed usunieciem konta konczone sa jego procesy i sesje, aby nie
+        # pozostawic aktywnych procesow ani nie zablokowac operacji.
+        - name: Sprawdz, czy stary uzytkownik istnieje
+          ansible.builtin.command: "id -u {{ old_user }}"
+          register: old_user_check
+          changed_when: false
+          failed_when: false
+
+        - name: Zakoncz procesy starego uzytkownika sygnalem KILL
+          ansible.builtin.command: "pkill -KILL -u {{ old_user }}"
+          when: old_user_check.rc == 0
+          register: old_user_kill
+          changed_when: old_user_kill.rc == 0
+          failed_when: false
+
+        - name: Zakoncz sesje logowania starego uzytkownika przez systemd
+          ansible.builtin.command: "loginctl terminate-user {{ old_user }}"
+          when: old_user_check.rc == 0
+          register: old_user_terminate
+          changed_when: old_user_terminate.rc == 0
+          failed_when: false
+
+        - name: Poczekaj az procesy starego uzytkownika znikna
+          ansible.builtin.command: "pgrep -u {{ old_user }}"
+          when: old_user_check.rc == 0
+          register: old_user_processes
+          changed_when: false
+          failed_when: false
+          retries: 5
+          delay: 2
+          until: old_user_processes.rc != 0
+
+        # Tryb zwykly usuwa plik <uzytkownik>-user, a wymuszony uwzglednia tez
+        # <uzytkownik> oraz warianty obu nazw z prefiksem liczbowym.
+        # W zadnym trybie nie sa zmieniane wspolne wpisy sudoers dla grup.
+        - name: Znajdz prywatne pliki sudoers starego uzytkownika w trybie wymuszonym
+          ansible.builtin.find:
+            paths: /etc/sudoers.d
+            file_type: file
+            use_regex: true
+            patterns:
+              - "^(?:[0-9]+-)?{{ old_user | regex_escape }}(?:-user)?$"
+          register: old_user_sudoers_files
+          when: force_delete_user_sudoers_files | bool
+
+        - name: Usun standardowe prywatne pliki sudoers starego uzytkownika
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "/etc/sudoers.d/{{ old_user }}-user"
+          when: not (force_delete_user_sudoers_files | bool)
+
+        - name: Usun znalezione prywatne pliki sudoers starego uzytkownika
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: absent
+          loop: "{{ old_user_sudoers_files.files | default([]) }}"
+          when: force_delete_user_sudoers_files | bool
+
+        # Usuniecie konta automatycznie odbiera mu czlonkostwo w grupach, w tym w sudo.
+
+        # remove: true usuwa standardowe pliki uzytkownika, glownie home i mail spool, podobnie jak userdel --remove
+        - name: Usun starego uzytkownika
+          ansible.builtin.user:
+            name: "{{ old_user }}"
+            state: absent
+            remove: true
+            force: true
+          when: old_user_check.rc == 0
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: delete_old_user"

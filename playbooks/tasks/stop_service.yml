@@ -1,0 +1,109 @@
+- name: Sprawdz, czy jednostka istnieje
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - "{{ service_name }}"
+      - --property=LoadState
+      - --value
+  register: service_load_state
+  changed_when: false
+  failed_when: false
+
+- name: Sprawdz stan wlaczania jednostki {{ service_name }}
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-enabled
+      - "{{ service_name }}"
+  register: service_enabled_state
+  changed_when: false
+  failed_when: false
+  when: service_load_state.stdout | trim == 'loaded'
+
+- name: Zatrzymaj i wylacz jednostke {{ service_name }}
+  ansible.builtin.systemd:
+    name: "{{ service_name }}"
+    state: stopped
+    enabled: false
+  when:
+    - service_load_state.stdout | trim == 'loaded'
+    - disable_service | default(false) | bool
+    - service_enabled_state.stdout | trim != 'static'
+
+- name: Zatrzymaj jednostke statyczna {{ service_name }}
+  ansible.builtin.systemd:
+    name: "{{ service_name }}"
+    state: stopped
+  when:
+    - service_load_state.stdout | trim == 'loaded'
+    - disable_service | default(false) | bool
+    - service_enabled_state.stdout | trim == 'static'
+
+- name: Zatrzymaj jednostke {{ service_name }} bez zmiany stanu po restarcie
+  ansible.builtin.systemd:
+    name: "{{ service_name }}"
+    state: stopped
+  when:
+    - service_load_state.stdout | trim == 'loaded'
+    - not (disable_service | default(false) | bool)
+
+# disable_service: true => wylaczenie startu po restarcie i zatrzymanie aktywnej uslugi
+# disable_service: false => tylko zatrzymanie biezacego procesu, bez blokady startu po restarcie
+
+- name: Sprawdz, czy jednostka {{ service_name }} zatrzymala sie po zwyklym stop
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - "{{ service_name }}"
+  when: service_load_state.stdout | trim == 'loaded'
+  register: service_stop_check
+  changed_when: false
+  failed_when: false
+  retries: "{{ service_stop_check_retries }}"
+  delay: "{{ service_stop_check_delay }}"
+  until: service_stop_check.rc != 0
+
+- name: Sprawdz, czy jednostka {{ service_name }} ma oczekiwany stan po restarcie
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-enabled
+      - "{{ service_name }}"
+  when:
+    - service_load_state.stdout | trim == 'loaded'
+    - disable_service | default(false) | bool
+  register: service_enabled_check
+  changed_when: false
+  failed_when: false
+  retries: "{{ service_stop_check_retries }}"
+  delay: "{{ service_stop_check_delay }}"
+  until: service_enabled_check.stdout | trim in ['disabled', 'static', 'not-found']
+
+- name: Wykonaj twarde zakonczenie jednostki {{ service_name }}
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - kill
+      - --kill-who=all
+      - --signal=SIGKILL
+      - "{{ service_name }}"
+  when:
+    - service_load_state.stdout | trim == 'loaded'
+    - hard_stop_services | default(false) | bool
+    - service_stop_check.rc | default(1) == 0
+
+- name: Potwierdz, ze jednostka {{ service_name }} jest zatrzymana
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - "{{ service_name }}"
+  when: service_load_state.stdout | trim == 'loaded'
+  changed_when: false
+  failed_when: service_final_check.rc == 0
+  retries: "{{ service_stop_check_retries }}"
+  delay: "{{ service_stop_check_delay }}"
+  register: service_final_check
+  until: service_final_check.rc != 0

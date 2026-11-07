@@ -1,0 +1,118 @@
+# Zadania wlaczane po migracji SSH lub konta aktualizuja pliki na kontrolerze.
+# Target moze byc hostem albo grupa. run_once zapobiega wielokrotnemu zapisowi.
+- name: Ustal target aktualizacji inventory
+  ansible.builtin.set_fact:
+    inventory_update_target: "{{ inventory_update_target_input | default('all') }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Ustal typ targetu inventory
+  ansible.builtin.set_fact:
+    inventory_update_target_is_group: "{{ inventory_update_target in groups }}"
+    inventory_update_target_is_host: "{{ inventory_update_target in hostvars }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Sprawdz poprawnosc targetu inventory
+  ansible.builtin.assert:
+    that:
+      - inventory_update_target_is_group or inventory_update_target_is_host
+      - not (inventory_update_target_is_group and inventory_update_target_is_host)
+    fail_msg: >-
+      Target '{{ inventory_update_target }}' nie istnieje albo jest jednoczesnie
+      nazwa grupy i hosta.
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Ustal hosty objete aktualizacja inventory
+  ansible.builtin.set_fact:
+    inventory_update_selected_hosts: >-
+      {{ groups[inventory_update_target] if inventory_update_target_is_group
+         else [inventory_update_target] }}
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Ustal grupy objete aktualizacja inventory
+  ansible.builtin.set_fact:
+    inventory_update_selected_groups: "{{ [inventory_update_target] if inventory_update_target_is_group else [] }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Dodaj nizsze grupy objete aktualizacja inventory
+  ansible.builtin.set_fact:
+    inventory_update_selected_groups: "{{ inventory_update_selected_groups + [item.key] }}"
+  loop: "{{ groups | dict2items }}"
+  when:
+    - inventory_update_target_is_group
+    - item.key not in ['all', 'ungrouped', inventory_update_target]
+    - item.value | length > 0
+    - item.value | difference(inventory_update_selected_hosts) | length == 0
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Ustal pliki vars objete aktualizacja inventory
+  ansible.builtin.set_fact:
+    inventory_update_files: >-
+      {{
+        (inventory_update_selected_groups
+         | map('regex_replace', '^', inventory_vars_root ~ '/group_vars/')
+         | map('regex_replace', '$', '/' ~ inventory_vars_file)
+         | list)
+        +
+        (inventory_update_selected_hosts
+         | map('regex_replace', '^', inventory_vars_root ~ '/host_vars/')
+         | map('regex_replace', '$', '/' ~ inventory_vars_file)
+         | list)
+        | unique | list
+      }}
+    inventory_update_target_file: >-
+      {{ inventory_vars_root ~ '/' ~
+         ('group_vars/' if inventory_update_target_is_group else 'host_vars/') ~
+         inventory_update_target ~ '/' ~ inventory_vars_file }}
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Utworz katalog docelowego pliku vars
+  ansible.builtin.file:
+    path: "{{ inventory_update_target_file | dirname }}"
+    state: directory
+    mode: "{{ inventory_vars_directory_mode | default('0750') }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Zapisz zmienna inventory w pliku docelowym
+  ansible.builtin.lineinfile:
+    path: "{{ inventory_update_target_file }}"
+    regexp: "^{{ item.key | regex_escape }}\\s*:"
+    line: "{{ item.key }}: {{ item.value }}"
+    state: present
+    create: true
+    owner: "{{ inventory_vars_file_owner }}"
+    group: "{{ inventory_vars_file_group }}"
+    mode: "{{ inventory_vars_file_mode }}"
+  loop: "{{ inventory_update_values | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+# Usuniecie nadpisan z wybranych nizszych grup i hostow zapobiega temu, by
+# stara wartosc miala pierwszenstwo nad nowa wartoscia docelowej grupy.
+- name: Usun nizsze nadpisania zmiennej inventory
+  ansible.builtin.lineinfile:
+    path: "{{ item }}"
+    regexp: "^{{ inventory_update_variable | regex_escape }}\\s*:"
+    state: absent
+  loop: "{{ inventory_update_files | difference([inventory_update_target_file]) }}"
+  delegate_to: localhost
+  become: false
+  run_once: true

@@ -1,0 +1,149 @@
+---
+# Baseline uprawnien dla plikow i katalogow uzywanych w srodowisku Ansible.
+# Ten plik nie tworzy uprawnien sam z siebie. Dostarcza dane dla playbooka
+# sprawdzajacego i egzekwujacego chmod, owner i group.
+
+# Domyslne wartosci wlascicielskie
+control_node_owner: __UZUPELNIJ_UZYTKOWNIK_KONTROLERA__
+control_node_group: __UZUPELNIJ_GRUPE_KONTROLERA__
+inventory_vars_file_owner: "{{ control_node_owner }}"
+inventory_vars_file_group: "{{ control_node_group }}"
+inventory_vars_file_mode: "0640"
+
+system_owner: root
+system_group: root
+
+# Specyficzne dla wszystkich serwerow baseline uprawnien do plikow i katalogow.
+# Lista wspolnych wpisow baseline dla hostow docelowych. Kazdy element to
+# slownik opisujacy jedna sciezke i jej wlasciciela, grupe, tryb oraz typ.
+# Lista pozwala playbookom przechodzic po wielu plikach i katalogach w petli.
+permission_baseline_all:
+  - path: "{{ sudoers_dir }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0750"
+    state: directory
+
+  - path: "{{ netplan_config_dir }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0755"
+    state: directory
+
+  - path: "{{ etckeeper_config_file }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ etckeeper_git_dir }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0700"
+    state: directory
+
+  - path: "{{ netplan_dns_file }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0600"
+    state: file
+
+# Baseline kontrolera / localhost.
+# To nie jest czesc permission_baseline hostow docelowych.
+controller_baseline:
+  - path: "{{ inventory_vars_root }}"
+    owner: "{{ control_node_owner }}"
+    group: "{{ control_node_group }}"
+    mode: "0750"
+    state: directory
+
+  - path: "{{ inventory_vars_hostfile }}"
+    owner: "{{ control_node_owner }}"
+    group: "{{ control_node_group }}"
+    mode: "0640"
+    state: file
+
+  - path: "{{ inventory_vars_group_vars_dir }}"
+    owner: "{{ control_node_owner }}"
+    group: "{{ control_node_group }}"
+    mode: "0750"
+    state: directory
+
+  - path: "{{ inventory_vars_host_vars_dir }}"
+    owner: "{{ control_node_owner }}"
+    group: "{{ control_node_group }}"
+    mode: "0750"
+    state: directory
+
+  - path: "{{ inventory_vars_root }}/group_vars/all/vars.yml"
+    owner: "{{ inventory_vars_file_owner }}"
+    group: "{{ inventory_vars_file_group }}"
+    mode: "{{ inventory_vars_file_mode }}"
+    state: file
+
+  - path: "{{ inventory_vars_root }}/group_vars/blue_group/vars.yml"
+    owner: "{{ inventory_vars_file_owner }}"
+    group: "{{ inventory_vars_file_group }}"
+    mode: "{{ inventory_vars_file_mode }}"
+    state: file
+
+  - path: "{{ inventory_vars_root }}/group_vars/red_group/vars.yml"
+    owner: "{{ inventory_vars_file_owner }}"
+    group: "{{ inventory_vars_file_group }}"
+    mode: "{{ inventory_vars_file_mode }}"
+    state: file
+
+  - path: "{{ inventory_vars_root }}/group_vars/app_servers/vars.yml"
+    owner: "{{ inventory_vars_file_owner }}"
+    group: "{{ inventory_vars_file_group }}"
+    mode: "{{ inventory_vars_file_mode }}"
+    state: file
+
+  - path: "{{ inventory_vars_root }}/group_vars/edge_servers/vars.yml"
+    owner: "{{ inventory_vars_file_owner }}"
+    group: "{{ inventory_vars_file_group }}"
+    mode: "{{ inventory_vars_file_mode }}"
+    state: file
+
+  - path: "{{ inventory_vars_root }}/group_vars/scanner_servers/vars.yml"
+    owner: "{{ inventory_vars_file_owner }}"
+    group: "{{ inventory_vars_file_group }}"
+    mode: "{{ inventory_vars_file_mode }}"
+    state: file
+
+  - path: "{{ inventory_vars_root }}/host_vars/app/vars.yml"
+    owner: "{{ inventory_vars_file_owner }}"
+    group: "{{ inventory_vars_file_group }}"
+    mode: "{{ inventory_vars_file_mode }}"
+    state: file
+
+  - path: "{{ inventory_vars_root }}/host_vars/edge/vars.yml"
+    owner: "{{ inventory_vars_file_owner }}"
+    group: "{{ inventory_vars_file_group }}"
+    mode: "{{ inventory_vars_file_mode }}"
+    state: file
+
+  - path: "{{ inventory_vars_root }}/host_vars/scanner/vars.yml"
+    owner: "{{ inventory_vars_file_owner }}"
+    group: "{{ inventory_vars_file_group }}"
+    mode: "{{ inventory_vars_file_mode }}"
+    state: file
+
+# Wynikowy baseline dla hosta: wspolna lista oraz listy jego grup.
+# group_names to lista grup biezacego hosta z inventory. ternary wybiera
+# liste danej grupy tylko dla jej czlonkow. default([]) oznacza pusta liste,
+# gdy zmienna nie istnieje. Operator + dokleja listy w podanej kolejnosci.
+# Przyklad: app otrzymuje wpisy all, blue_group i app_servers.
+# To nie jest scalanie po path: powtorzona sciezka pozostaje osobnym wpisem.
+# enforce_file_baseline.yml wymaga unikalnych sciezek, a inne playbooki moga
+# wybierac pierwszy lub ostatni pasujacy wpis, wiec nie nalezy polegac na
+# automatycznym nadpisywaniu uprawnien przez pozniejszy element listy.
+permission_baseline: >-
+  {{
+    (permission_baseline_all | default([]))
+    + (('blue_group' in (group_names | default([]))) | ternary(permission_baseline_blue | default([]), []))
+    + (('red_group' in (group_names | default([]))) | ternary(permission_baseline_red | default([]), []))
+    + (('edge_servers' in (group_names | default([]))) | ternary(permission_baseline_edge | default([]), []))
+    + (('app_servers' in (group_names | default([]))) | ternary(permission_baseline_app | default([]), []))
+    + (('scanner_servers' in (group_names | default([]))) | ternary(permission_baseline_scanner | default([]), []))
+  }}

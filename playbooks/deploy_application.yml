@@ -1,0 +1,115 @@
+﻿---
+- name: Wdrozenie aplikacji przy uzyciu docker compose
+  hosts: app_servers
+  become: true
+
+  tasks:
+    - name: Wdrozenie aplikacji
+      block:
+        - name: Utworz katalog aplikacji
+          ansible.builtin.file:
+            path: "{{ app_dir }}"
+            state: directory
+            mode: "{{ permission_baseline_app | selectattr('path','equalto', app_dir) | map(attribute='mode') | list | first | default('0755') }}"
+
+        - name: Kopiuj profile AppArmor
+          ansible.builtin.copy:
+            src: "files/{{ item }}"
+            dest: "/etc/apparmor.d/{{ item }}"
+            mode: '0644'
+          # Kopiowanie kilku profili wymaga uzycia petli w tasku
+          # Alternatywnie mozna skopiowac caly katalog
+          loop:
+            - apparmor-db
+            - apparmor-backend
+            - apparmor-frontend
+          register: aa_files
+
+        - name: Zaladuj profile AppArmor
+          ansible.builtin.command:
+            cmd: "apparmor_parser -r -W /etc/apparmor.d/{{ item.item }}"
+          when: item.changed
+          loop: "{{ aa_files.results }}"
+
+        # Szablon Compose i katalogi aplikacji pochodza z playbooks/templates
+        # oraz playbooks/files na kontrolerze i trafiaja na serwer aplikacji.
+        - name: Wgraj szablon docker-compose.yml
+          ansible.builtin.template:
+            src: templates/docker-compose.yml.j2
+            dest: "{{ app_docker_compose | default(app_dir ~ '/docker-compose.yml') }}"
+            mode: '0644'
+
+        # Preserve: utrzymanie tych samych uprawnien dla plikow wewnetrznych
+        - name: Kopiuj katalog backend
+          ansible.builtin.copy:
+            src: files/backend/
+            dest: "{{ app_dir }}/backend/"
+            owner: root
+            group: root
+            mode: preserve
+            directory_mode: "{{ permission_baseline_app | selectattr('path','equalto', app_backend_dir) | map(attribute='mode') | list | first | default('0755') }}"
+          become: true
+        
+        - name: Kopiuj katalog frontend
+          ansible.builtin.copy:
+            src: files/frontend/
+            dest: "{{ app_dir }}/frontend/"
+            owner: root
+            group: root
+            mode: preserve
+            directory_mode: "{{ permission_baseline_app | selectattr('path','equalto', app_frontend_dir) | map(attribute='mode') | list | first | default('0755') }}"
+          become: true
+
+        - name: Uruchom aplikacje (Docker Compose)
+          ansible.builtin.command:
+            cmd: "docker compose up -d --build --remove-orphans --wait"
+            chdir: "{{ app_dir }}"
+          register: docker_output
+          changed_when: 
+            - "'Started' in docker_output.stdout or 'Created' in docker_output.stdout"
+
+        - name: Sprawdz status kontenerow
+          command: 
+            cmd: "docker compose ps"
+            chdir: "{{ app_dir }}"
+          register: ps_output
+          changed_when: false
+
+        - name: Wyswietl stan uslug
+          debug:
+            var: ps_output.stdout_lines
+
+        # Kontenery sa sprawdzane z hosta aplikacji przez lokalne endpointy.
+        # Wynik nie zastepuje testu dostepu przez zewnetrzny reverse proxy.
+        - name: Sprawdzenie backendu
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:5000/api/health"
+            status_code: 200
+            return_content: true
+          register: backend_health
+          retries: 10
+          delay: 5
+          until:
+            - backend_health.status == 200
+            - backend_health.json is defined
+            - backend_health.json.status is defined
+            - backend_health.json.status == "healthy"
+
+        - name: Sprawdzenie frontendu
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ frontend_port | default(8443) }}"
+            status_code: 200
+          register: frontend_health
+          retries: 10
+          delay: 5
+          until: frontend_health.status == 200
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: deploy_application"

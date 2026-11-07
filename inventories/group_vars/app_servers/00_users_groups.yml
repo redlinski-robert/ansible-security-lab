@@ -1,0 +1,7 @@
+---
+# Specyficzne dla serwerow app ustawienia uzytkownikow i grup oraz baseline sudo.
+
+# Puste override baseline sudo dla app_servers (dokladane do *_all)
+baseline_sudo_accounts_check_app: {}
+baseline_sudo_allowed_methods_app: []
+baseline_sudo_known_privileged_groups_app: []

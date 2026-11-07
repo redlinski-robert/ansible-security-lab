@@ -1,0 +1,20 @@
+---
+# Dodatkowe ustawienia sciezek dla grupy blue_group.
+# Dodatkowe sciezki dla hostow w grupie defensywnej.
+
+pam_sshd: /etc/pam.d/sshd
+apt_auto_upgrades_file: /etc/apt/apt.conf.d/20auto-upgrades
+update_motd_file: /etc/update-motd.d/10-help-text
+motd_file: /etc/motd
+issue_net_file: /etc/issue.net
+grub_config_file: /etc/default/grub
+
+# Pliki i katalogi dla zainstalowanych pakietow
+fail2ban_jail_local_file: /etc/fail2ban/jail.local
+apparmor_profiles_dir: /etc/apparmor.d/
+zabbix_backup_dir: /etc/zabbix/ansible-backup
+zabbix_agent2_conf: /etc/zabbix/zabbix_agent2.conf
+
+# Wspolne porty uslug dla grupy blue_group
+https_port: 443
+frontend_port: 8443

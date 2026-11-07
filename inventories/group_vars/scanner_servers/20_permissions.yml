@@ -1,0 +1,21 @@
+---
+# Specyficzny dla serwerow scanner baseline uprawnien do plikow i katalogow.
+
+permission_baseline_scanner:
+  - path: "{{ rockyou_path }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ rocktest_path }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ rockyou_path_gz }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0644"
+    state: file

@@ -1,0 +1,69 @@
+---
+# Specyficzny dla serwerow blue baseline uprawnien do plikow i katalogow.
+
+permission_baseline_blue:
+  - path: "{{ grub_config_file }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ pam_sshd }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ ssh_server_config_file }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0600"
+    state: file
+
+  - path: "{{ apt_auto_upgrades_file }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ update_motd_file }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0755"
+    state: file
+
+  - path: "{{ motd_file }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ issue_net_file }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ fail2ban_jail_local_file }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0640"
+    state: file
+
+  - path: "{{ apparmor_profiles_dir }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0755"
+    state: directory
+
+  - path: "{{ zabbix_backup_dir }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0750"
+    state: directory
+
+  - path: "{{ zabbix_agent2_conf }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0644"
+    state: file

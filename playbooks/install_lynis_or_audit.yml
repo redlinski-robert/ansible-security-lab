@@ -1,0 +1,101 @@
+﻿---
+- name: Wdrozenie i audyt bezpieczenstwa za pomoca Lynis
+  hosts: blue_group
+  become: true
+  gather_facts: true
+
+  vars:
+    lynis_report_root: "{{ playbook_dir }}/../reports/lynis"
+
+  tasks:
+    - name: Sprawdz zainstalowana wersje pakietu Lynis
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - -f=${Version}
+          - lynis
+      register: lynis_installed_version
+      changed_when: false
+      failed_when: false
+
+    - name: Sprawdz blokade hold pakietu Lynis
+      ansible.builtin.command:
+        argv:
+          - dpkg
+          - --get-selections
+          - lynis
+      register: lynis_package_selection
+      changed_when: false
+      failed_when: false
+
+    - name: Ustal czy pakiet wymaga instalacji lub zmiany wersji
+      ansible.builtin.set_fact:
+        lynis_package_change_required: >-
+          {{
+            lynis_installed_version.rc != 0 or
+            lynis_installed_version.stdout | trim != package_versions_effective['lynis']
+          }}
+        lynis_package_held: "{{ lynis_package_selection.stdout is search('\\bhold$') }}"
+      changed_when: false
+
+    - name: Lynis installation
+      block:
+        - name: Zdejmij blokade hold dla pakietu wymagajacego zmiany
+          ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+          vars:
+            package_guard_packages:
+              - "lynis={{ package_versions_effective['lynis'] }}"
+
+        - name: Zainstaluj narzedzie Lynis w ustalonej wersji
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages:
+              - "lynis={{ package_versions_effective['lynis'] }}"
+            package_guard_apt_update_cache: true
+            package_guard_apt_retries: 5
+            package_guard_apt_delay: 10
+        
+        # timestamp audytu umozliwia tworzenie unikalnych nazw plikow raportow dla kazdego audytu
+        # Czas identyfikuje przebieg audytu, a raport jest pobierany z hosta
+        # na kontroler, a wskaznik hardeningu odczytywany z wynikow Lynis.
+        - name: Ustal timestamp audytu
+          ansible.builtin.set_fact:
+            lynis_audit_timestamp: "{{ ansible_date_time.iso8601_basic_short }}"
+
+        - name: Wykonaj audyt systemu Lynis
+          command: lynis audit system --cronjob
+          register: lynis_output
+          # false, zeby falszywie nie wplywac na test idempotentnosci.
+          # W rzeczywistosci za kazdym razem jest tworzony nowy raport.
+          changed_when: false
+          # Lynis zwraca czasem kod wyjscia inny niz 0 w przypadku znalezienia ostrzezen,
+          # ignorujemy to, aby playbook nie zakonczyl sie bledem.
+          failed_when: false 
+
+        - name: Wyciagnij 'Hardening index' z logow
+          debug:
+            msg: "{{ lynis_output.stdout_lines | select('search', 'Hardening index') | list }}"
+
+        - name: Pobierz raport audytu na maszyne sterujaca
+          # changed dopuszczalny - to pobranie nowego pliku raportu z timestampem, wiec zawsze bedzie nowy plik
+          fetch:
+            src: /var/log/lynis-report.dat
+            dest: "{{ lynis_report_root }}/{{ inventory_hostname }}/{{ lynis_audit_timestamp }}-lynis-report.dat"
+            flat: true
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Ustaw blokade hold dla pakietu
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages:
+              - "lynis={{ package_versions_effective['lynis'] }}"
+
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: install_lynis_or_audit"

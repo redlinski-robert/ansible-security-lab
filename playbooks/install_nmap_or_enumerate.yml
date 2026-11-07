@@ -1,0 +1,249 @@
+﻿---
+- name: Instalacja Nmap i skanowanie hostow blue
+  hosts: scanner_servers
+  become: true
+  gather_facts: false
+
+  vars:
+    nmap_target_group: blue_group
+    nmap_report_root: "{{ playbook_dir }}/../reports/nmap"
+    nmap_input_root: "{{ playbook_dir }}/input/nmap"
+
+  pre_tasks:
+    # Cele sa pobierane z grupy inventory. Identyfikator przebiegu laczy
+    # raporty zapisywane na kontrolerze.
+    - name: Sprawdzenie, czy grupa docelowa istnieje w inventory
+      ansible.builtin.assert:
+        that:
+          - nmap_target_group in groups
+          - groups[nmap_target_group] | length > 0
+        fail_msg: "Grupa '{{ nmap_target_group }}' nie istnieje albo nie zawiera hostow."
+
+    - name: Ustawienie batch id na masterze Ansible
+      ansible.builtin.set_fact:
+        nmap_batch_id: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+      delegate_to: localhost
+      delegate_facts: true
+      run_once: true
+      become: false
+
+    - name: Zbudowanie listy adresow IP dla Nmapa
+      ansible.builtin.set_fact:
+        nmap_targets: "{{ groups[nmap_target_group] | map('extract', hostvars, 'ansible_host') | list }}"
+
+    - name: Sprawdzenie, czy lista targetow nie jest pusta
+      ansible.builtin.assert:
+        that:
+          - nmap_targets | length > 0
+        fail_msg: "Nie udalo sie zbudowac listy targetow. Sprawdz, czy hosty w grupie '{{ nmap_target_group }}' maja ansible_host."
+
+    - name: Utworzenie katalogu raportow na localhost
+      ansible.builtin.file:
+        path: "{{ nmap_report_root }}/{{ hostvars['localhost']['nmap_batch_id'] }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      run_once: true
+      become: false
+
+    - name: Utworzenie katalogu reports na localhost
+      ansible.builtin.file:
+        path: "{{ nmap_input_root }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      run_once: true
+      become: false
+
+  tasks:
+    - name: Sprawdz zainstalowana wersje pakietu Nmap
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - -f=${Version}
+          - nmap
+      register: nmap_installed_version
+      changed_when: false
+      failed_when: false
+
+    - name: Sprawdz blokade hold pakietu Nmap
+      ansible.builtin.command:
+        argv:
+          - dpkg
+          - --get-selections
+          - nmap
+      register: nmap_package_selection
+      changed_when: false
+      failed_when: false
+
+    - name: Ustal czy pakiet wymaga instalacji lub zmiany wersji
+      ansible.builtin.set_fact:
+        nmap_package_change_required: >-
+          {{
+            nmap_installed_version.rc != 0 or
+            nmap_installed_version.stdout | trim != package_versions_effective['nmap']
+          }}
+        nmap_package_held: "{{ nmap_package_selection.stdout is search('\\bhold$') }}"
+      changed_when: false
+
+    - name: Instalacja i uruchomienie skanowania nmap
+      block:
+        - name: Zdejmij blokade hold dla pakietu wymagajacego zmiany
+          ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+          vars:
+            package_guard_packages:
+              - "nmap={{ package_versions_effective['nmap'] }}"
+
+        - name: Aktualizacja cache i instalacja nmap
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages:
+              - "nmap={{ package_versions_effective['nmap'] }}"
+            package_guard_apt_update_cache: true
+            package_guard_apt_retries: 5
+            package_guard_apt_delay: 10
+
+        - name: Utworzenie katalogu tymczasowego na wyniki Nmap
+          ansible.builtin.file:
+            path: /tmp/nmap_results
+            state: directory
+            mode: "1777"
+
+        - name: Uruchom enumeracje portow i uslug Nmap
+          ansible.builtin.command: "nmap -sV -sC -p- -oN /tmp/nmap_results/nmap_{{ hostvars['localhost']['nmap_batch_id'] }}_{{ inventory_hostname }}_{{ item | regex_replace('[^A-Za-z0-9_.-]', '_') }}.txt {{ item }}"
+          loop: "{{ nmap_targets }}"
+          register: nmap_output
+          become: false
+          changed_when: true
+
+        - name: Wyswietl podsumowanie skanowania w konsoli
+          ansible.builtin.debug:
+            msg: "{{ item.stdout_lines }}"
+          loop: "{{ nmap_output.results }}"
+
+        - name: Pobranie raportu tekstowego na master Ansible
+          # changed dopuszczalny - to pobranie nowego pliku raportu z batch_id, wiec zawsze bedzie nowy plik
+          ansible.builtin.fetch:
+            src: "/tmp/nmap_results/nmap_{{ hostvars['localhost']['nmap_batch_id'] }}_{{ inventory_hostname }}_{{ item | regex_replace('[^A-Za-z0-9_.-]', '_') }}.txt"
+            dest: "{{ nmap_report_root }}/{{ hostvars['localhost']['nmap_batch_id'] }}/"
+            flat: true
+          loop: "{{ nmap_targets }}"
+
+        # Wyniki enumeracji sa przeksztalcane w osobne pliki JSON z celami
+        # SSH dla Hydry oraz HTTP/HTTPS dla Nikto.
+        - name: Przygotuj puste listy inputow
+          ansible.builtin.set_fact:
+            hydra_input_targets: []
+            nikto_input_targets: []
+
+        - name: Dodaj porty SSH do inputu Hydry
+          ansible.builtin.set_fact:
+            hydra_input_targets: "{{ hydra_input_targets + [hydra_target] }}"
+          vars:
+            hydra_target:
+              host: "{{ item.0.item }}"
+              port: "{{ item.1.split()[0].split('/')[0] | int }}"
+              protocol: ssh
+              transport: tcp
+          loop: "{{ nmap_output.results | subelements('stdout_lines', skip_missing=True) }}"
+          when: item.1 is match('^[0-9]+/tcp\\s+open\\s+ssh\\b')
+
+        - name: Dodaj porty HTTP/HTTPS do inputu Nikto
+          ansible.builtin.set_fact:
+            nikto_input_targets: "{{ nikto_input_targets + [nikto_target] }}"
+          vars:
+            service_name: "{{ item.1.split()[2] }}"
+            scheme: "{{ 'https' if service_name in ['https', 'ssl/http'] else 'http' }}"
+            nikto_target:
+              host: "{{ item.0.item }}"
+              port: "{{ item.1.split()[0].split('/')[0] | int }}"
+              scheme: "{{ scheme }}"
+              url: "{{ scheme }}://{{ item.0.item }}:{{ item.1.split()[0].split('/')[0] | int }}"
+              transport: tcp
+          loop: "{{ nmap_output.results | subelements('stdout_lines', skip_missing=True) }}"
+          when: item.1 is match('^[0-9]+/tcp\\s+open\\s+(http|http-proxy|https|ssl/http)\\b')
+
+        - name: Zapisz hydra_input.json w reports
+          ansible.builtin.copy:
+            dest: "{{ nmap_input_root }}/hydra_input.json"
+            mode: "0600"
+            content: |
+              {{
+                {
+                  'generated_by': 'install_nmap_or_enumerate.yml',
+                  'batch_id': hostvars['localhost']['nmap_batch_id'],
+                  'source': 'nmap stdout',
+                  'count': hydra_input_targets | length,
+                  'targets': hydra_input_targets
+                } | to_nice_json
+              }}
+          delegate_to: localhost
+          run_once: true
+          become: false
+
+        - name: Zapisz nikto_input.json w reports
+          ansible.builtin.copy:
+            dest: "{{ nmap_input_root }}/nikto_input.json"
+            mode: "0600"
+            content: |
+              {{
+                {
+                  'generated_by': 'install_nmap_or_enumerate.yml',
+                  'batch_id': hostvars['localhost']['nmap_batch_id'],
+                  'source': 'nmap stdout',
+                  'count': nikto_input_targets | length,
+                  'targets': nikto_input_targets
+                } | to_nice_json
+              }}
+          delegate_to: localhost
+          run_once: true
+          become: false
+
+        - name: Utworzenie katalogu batchowego inputow w reports
+          ansible.builtin.file:
+            path: "{{ nmap_input_root }}/{{ hostvars['localhost']['nmap_batch_id'] }}"
+            state: directory
+            mode: "0700"
+          delegate_to: localhost
+          run_once: true
+          become: false
+
+        - name: Zapisz kopie batchowe inputow w reports
+          ansible.builtin.copy:
+            dest: "{{ nmap_input_root }}/{{ hostvars['localhost']['nmap_batch_id'] }}/{{ item.name }}"
+            mode: "0600"
+            content: |
+              {{
+                {
+                  'generated_by': 'install_nmap_or_enumerate.yml',
+                  'batch_id': hostvars['localhost']['nmap_batch_id'],
+                  'source': 'nmap stdout',
+                  'count': item.targets | length,
+                  'targets': item.targets
+                } | to_nice_json
+              }}
+          loop:
+            - name: hydra_input.json
+              targets: "{{ hydra_input_targets }}"
+            - name: nikto_input.json
+              targets: "{{ nikto_input_targets }}"
+          delegate_to: localhost
+          run_once: true
+          become: false
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Ustaw blokade hold dla pakietu
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages:
+              - "nmap={{ package_versions_effective['nmap'] }}"
+
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: install_nmap_or_enumerate"

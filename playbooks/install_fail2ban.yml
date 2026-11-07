@@ -1,0 +1,93 @@
+﻿---
+- name: Instalacja Fail2Ban z bezpieczna lista IP
+  hosts: blue_group
+  become: yes
+
+  tasks:
+    - name: Sprawdz zainstalowana wersje pakietu Fail2Ban
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - -f=${Version}
+          - fail2ban
+      register: fail2ban_installed_version
+      changed_when: false
+      failed_when: false
+
+    - name: Sprawdz blokade hold pakietu Fail2Ban
+      ansible.builtin.command:
+        argv:
+          - dpkg
+          - --get-selections
+          - fail2ban
+      register: fail2ban_package_selection
+      changed_when: false
+      failed_when: false
+
+    - name: Ustal czy pakiet wymaga instalacji lub zmiany wersji
+      ansible.builtin.set_fact:
+        fail2ban_package_change_required: >-
+          {{
+            fail2ban_installed_version.rc != 0 or
+            fail2ban_installed_version.stdout | trim != package_versions_effective['fail2ban']
+          }}
+        fail2ban_package_held: "{{ fail2ban_package_selection.stdout is search('\\bhold$') }}"
+      changed_when: false
+
+    - name: fail2ban installation
+      block:
+        - name: Zdejmij blokade hold dla pakietu wymagajacego zmiany
+          ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+          vars:
+            package_guard_packages:
+              - "fail2ban={{ package_versions_effective['fail2ban'] }}"
+
+        - name: Zainstaluj Fail2Ban i wymagane narzedzia w ustalonych wersjach
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages:
+              - "fail2ban={{ package_versions_effective['fail2ban'] }}"
+            package_guard_apt_update_cache: true
+            package_guard_apt_cache_valid_time: 3600
+            package_guard_apt_retries: 5
+            package_guard_apt_delay: 10
+
+        # Szablon z playbooks/templates laczy ustawienia jail z adresem
+        # kontrolera z inventory. Localhost i kontroler sa na liscie ignorowanych.
+        - name: Konfiguracja jail.local
+          ansible.builtin.template:
+            src: "templates/jail.local.j2"
+            dest: "{{ fail2ban_jail_local_file }}"
+            owner: root
+            group: root
+            mode: "0640"
+          notify: Restart fail2ban
+
+        - name: Upewnij sie, ze fail2ban jest uruchomiony i wlaczony przy starcie systemu
+          systemd:
+            name: fail2ban
+            state: started
+            enabled: yes
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Ustaw blokade hold dla pakietu
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages:
+              - "fail2ban={{ package_versions_effective['fail2ban'] }}"
+
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: install_fail2ban"
+  handlers:
+    - name: Restart fail2ban
+      ansible.builtin.systemd:
+        name: fail2ban
+        state: restarted
+

@@ -1,0 +1,298 @@
+﻿---
+- name: Egzekwowanie baseline kont sudo
+  hosts: "{{ sudo_baseline_target | default('all') }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  # ToDo - testy z wyciaganiem zmiennych z vars files sudo_baseline_accounts.yml
+  # --check i --diff powinny pokazac, jakie zmiany zostana wprowadzone,
+  # np. dodane/zmienione pliki sudoers, zmiany w grupach uzytkownikow itp.
+  
+  # Zmienne dla tego playbooka sa ladowane z inventories/group_vars/all/00_users_groups.yml
+
+  vars:
+    sudo_baseline_report_root: "{{ playbook_dir }}/../reports/sudo_baseline"
+    sudo_baseline_report_file: "{{ sudo_baseline_report_root }}/{{ inventory_hostname }}-sudo-baseline-report.txt"
+
+  tasks:
+    - block:
+        # Efektywny slownik kont laczy konfiguracje wspolna i grupowa z
+        # inventory. Z niego wyznaczane sa wymagane pliki sudoers i grupy.
+        # Faza 1: Walidacja wejscia
+        - name: Egzekwowanie baseline kont sudo
+          block:
+            - name: "[Walidacja 1/4] Sprawdzenie, czy baseline_sudo_accounts_check jest slownikiem"
+              ansible.builtin.assert:
+                that:
+                  - baseline_sudo_accounts_check_effective is mapping
+                fail_msg: "baseline_sudo_accounts_check musi byc zdefiniowany jako slownik."
+
+            - name: "[Walidacja 2/4] Sprawdzenie poprawnosci wpisow baseline_sudo_accounts_check"
+              ansible.builtin.assert:
+                that:
+                  - item.value.method is defined
+                  - item.value.method in baseline_sudo_allowed_methods_effective
+                  - item.value.group is defined
+                  - item.value.group | length > 0
+                  - item.value.method == 'group' or item.value.group not in baseline_sudo_known_privileged_groups_effective
+                fail_msg: >-
+                  Niepoprawna konfiguracja sudo dla konta {{ item.key }}: {{ item.value }}.
+                  Dla metod sudoers_user i sudoers_group nie ustawiaj group na sudo/wheel/admin,
+                  bo taka grupa sama moze nadawac sudo.
+              loop: "{{ baseline_sudo_accounts_check_effective | dict2items }}"
+
+        # Faza 2: Inspekcja i przygotowanie stanu docelowego
+            - name: "[Inspekcja 1/4] Upewnij sie, ze wymagane grupy istnieja"
+              ansible.builtin.group:
+                name: "{{ item.value.group }}"
+                state: present
+              loop: "{{ baseline_sudo_accounts_check_effective | dict2items }}"
+
+            - name: "[Inspekcja 2/4] Upewnij sie, ze wymagani uzytkownicy istnieja i maja wlasciwa grupe podstawowa"
+              ansible.builtin.user:
+                name: "{{ item.key }}"
+                group: "{{ item.value.group }}"
+                shell: "{{ ansible_user_shell | default('/bin/bash') }}"
+                home: "/home/{{ item.key }}"
+                create_home: true
+                state: present
+              loop: "{{ baseline_sudo_accounts_check_effective | dict2items }}"
+
+            - name: "[Inspekcja 3/4] Wyznaczenie dozwolonych plikow sudoers_user"
+              ansible.builtin.set_fact:
+                baseline_allowed_sudoers_user_files: >-
+                  {{
+                    baseline_sudo_accounts_check_effective
+                    | dict2items
+                    | selectattr('value.method', 'equalto', 'sudoers_user')
+                    | map(attribute='key')
+                    | map('regex_replace', '^(.*)$', baseline_sudoers_dir ~ '/\1-user')
+                    | list
+                  }}
+
+            - name: "[Inspekcja 4/4] Wyznaczenie dozwolonych plikow sudoers_group"
+              ansible.builtin.set_fact:
+                baseline_allowed_sudoers_group_files: >-
+                  {{
+                    baseline_sudo_accounts_check_effective
+                    | dict2items
+                    | selectattr('value.method', 'equalto', 'sudoers_group')
+                    | map(attribute='value.group')
+                    | map('regex_replace', '^(.*)$', baseline_sudoers_dir ~ '/\1-group')
+                    | list
+                  }}
+
+        # Faza 3: Remediacja / usuwanie i tworzenie plikow sudoers
+            - name: "[Remediacja 1/8] Wyszukanie zarzadzanych plikow sudoers_user"
+              ansible.builtin.find:
+                paths: "{{ baseline_sudoers_dir }}"
+                patterns: "*-user"
+                file_type: file
+              register: managed_sudoers_user_files
+              when: baseline_sudo_prune_managed_sudoers_files | bool
+
+            - name: "[Remediacja 2/8] Wyszukanie zarzadzanych plikow sudoers_group"
+              ansible.builtin.find:
+                paths: "{{ baseline_sudoers_dir }}"
+                patterns: "*-group"
+                file_type: file
+              register: managed_sudoers_group_files
+              when: baseline_sudo_prune_managed_sudoers_files | bool
+
+            - name: "[Remediacja 3/8] Usuniecie niezgodnych zarzadzanych plikow sudoers_user"
+              ansible.builtin.file:
+                path: "{{ item.path }}"
+                state: absent
+              loop: "{{ managed_sudoers_user_files.files | default([]) }}"
+              when:
+                - baseline_sudo_prune_managed_sudoers_files | bool
+                - item.path not in baseline_allowed_sudoers_user_files
+
+            - name: "[Remediacja 4/8] Usuniecie niezgodnych zarzadzanych plikow sudoers_group"
+              ansible.builtin.file:
+                path: "{{ item.path }}"
+                state: absent
+              loop: "{{ managed_sudoers_group_files.files | default([]) }}"
+              when:
+                - baseline_sudo_prune_managed_sudoers_files | bool
+                - item.path not in baseline_allowed_sudoers_group_files
+
+            - name: "[Remediacja 5/8] Utworzenie poprawnych plikow sudoers_user"
+              ansible.builtin.copy:
+                dest: "{{ baseline_sudoers_dir }}/{{ item.key }}-user"
+                content: "{{ item.key }} ALL=(ALL) NOPASSWD:ALL\n"
+                owner: root
+                group: root
+                mode: "0440"
+                validate: "visudo -cf %s"
+              loop: "{{ baseline_sudo_accounts_check_effective | dict2items }}"
+              when: item.value.method == "sudoers_user"
+
+            - name: "[Remediacja 6/8] Utworzenie poprawnych plikow sudoers_group"
+              ansible.builtin.copy:
+                dest: "{{ baseline_sudoers_dir }}/{{ item.value.group }}-group"
+                content: "%{{ item.value.group }} ALL=(ALL) NOPASSWD:ALL\n"
+                owner: root
+                group: root
+                mode: "0440"
+                validate: "visudo -cf %s"
+              loop: "{{ baseline_sudo_accounts_check_effective | dict2items }}"
+              when: item.value.method == "sudoers_group"
+            - name: "[Remediacja 7/8] Usuniecie niezgodnego czlonkostwa w znanych grupach uprzywilejowanych"
+              ansible.builtin.shell: |
+                set -o pipefail
+
+                user="{{ item.0.key }}"
+                group="{{ item.1 }}"
+
+                if ! id "$user" >/dev/null 2>&1; then
+                  echo "user_missing"
+                  exit 0
+                fi
+
+                if ! getent group "$group" >/dev/null 2>&1; then
+                  echo "group_missing"
+                  exit 0
+                fi
+
+                if id -nG "$user" | tr ' ' '\n' | grep -qx "$group"; then
+                  primary_group="$(id -gn "$user")"
+
+                  if [ "$primary_group" = "$group" ]; then
+                    echo "primary_group_skip"
+                    exit 0
+                  fi
+
+                  gpasswd -d "$user" "$group"
+                  echo "removed"
+                else
+                  echo "not_present"
+                fi
+              args:
+                executable: /bin/bash
+              loop: "{{ baseline_sudo_accounts_check_effective | dict2items | product(baseline_sudo_known_privileged_groups_effective) | list }}"
+              when: not (item.0.value.method == 'group' and item.0.value.group == item.1)
+              register: privileged_group_cleanup
+              changed_when: "'removed' in privileged_group_cleanup.stdout"
+              failed_when: false
+
+            # Pokazanie finalnego stanu sudo dla kazdego uzytkownika
+            # Wylaczenie ostrzezen jest celowe, aby uniknac falszywych alarmow podczas sprawdzania sudo
+            # np.: [WARNING]: Consider using 'become', 'become_method', and 'become_user' rather than running sudo
+            - name: "[Remediacja 8/8] Sprawdzenie finalnego sudo przez sudo -l"
+              ansible.builtin.command: "sudo -l -U {{ item.key }}"
+              args:
+                warn: false
+              register: sudo_check_result
+              check_mode: false
+              changed_when: false
+              failed_when: false
+              loop: "{{ baseline_sudo_accounts_check_effective | dict2items }}"
+
+            - name: "[Raportowanie 1/2] Pokazanie wyniku kontroli sudo"
+              ansible.builtin.debug:
+                msg: "{{ item.item.key }}: rc={{ item.rc }}"
+              loop: "{{ sudo_check_result.results }}"
+
+            - name: "[Raportowanie 2/2] Utworzenie katalogu na raporty sudo na kontrolerze"
+              ansible.builtin.file:
+                path: "{{ sudo_baseline_report_root }}"
+                state: directory
+                mode: "0755"
+              become: false
+              delegate_to: localhost
+              run_once: true
+
+            - name: "[Raportowanie] Statystyka plikow sudoers wymaganych przez baseline"
+              ansible.builtin.stat:
+                path: "{{ item }}"
+              loop: >-
+                {{
+                  (baseline_allowed_sudoers_user_files | default([]))
+                  + (baseline_allowed_sudoers_group_files | default([]))
+                }}
+              register: sudoers_report_stats
+              changed_when: false
+              failed_when: false
+
+            - name: "[Raportowanie] Zbieranie rozbieznosci dla uzytkownikow i grup sudo"
+              ansible.builtin.set_fact:
+                sudo_baseline_report_lines: "{{ sudo_baseline_report_lines | default([]) + [ report_line ] }}"
+              loop: "{{ baseline_sudo_accounts_check_effective | dict2items }}"
+              vars:
+                user_result: >-
+                  {{
+                    (sudo_check_result.results | default([]))
+                    | selectattr('item.key', 'defined')
+                    | selectattr('item.key', 'equalto', item.key)
+                    | first
+                    | default({})
+                  }}
+                expected_file: >-
+                  {{
+                    (item.value.method == 'sudoers_user')
+                    | ternary(baseline_sudoers_dir ~ '/' ~ item.key ~ '-user', baseline_sudoers_dir ~ '/' ~ item.value.group ~ '-group')
+                  }}
+                file_stat: >-
+                  {{
+                    (sudoers_report_stats.results | default([]))
+                    | selectattr('item', 'defined')
+                    | selectattr('item', 'equalto', expected_file)
+                    | map(attribute='stat')
+                    | first
+                    | default({})
+                  }}
+                report_line: >-
+                  {% set user_ok = user_result.rc is defined and user_result.rc == 0 %}
+                  {% set file_ok = file_stat.exists | default(false) %}
+                  {{ item.key }}: method={{ item.value.method }} group={{ item.value.group }} sudo_check={{ user_ok | ternary('OK', 'MISMATCH') }} expected_file={{ expected_file }} file_present={{ file_ok | ternary('yes', 'no') }}
+
+            - name: "[Raportowanie] Zbieranie rozbieznosci dla nieoczekiwanych zarzadzanych plikow sudoers"
+              ansible.builtin.set_fact:
+                sudo_baseline_report_lines: "{{ sudo_baseline_report_lines | default([]) + [ report_line ] }}"
+              loop: "{{ (managed_sudoers_user_files.files | default([]) + managed_sudoers_group_files.files | default([])) }}"
+              vars:
+                report_line: >-
+                  unexpected_managed_sudoers_file={{ item.path }}
+              when: >-
+                {
+                  'path': item.path,
+                  'exists': true
+                }
+
+            - name: "[Raportowanie] Zapisanie raportu rozbieznosci sudo do pliku"
+              ansible.builtin.copy:
+                dest: "{{ sudo_baseline_report_file }}"
+                content: |
+                  Baseline sudo dla hosta: {{ inventory_hostname }}
+                  Tryb: {{ ansible_check_mode | ternary('dry run', 'apply') }}
+
+                  {% for line in sudo_baseline_report_lines | default([]) %}
+                  {{ line }}
+                  {% endfor %}
+                mode: "0644"
+              become: false
+              delegate_to: localhost
+              changed_when: false
+
+          rescue:
+            - name: Pokaz blad wykonania baseline sudo
+              ansible.builtin.debug:
+                msg: "Wystapil blad podczas egzekwowania baseline sudo. Sprawdz poprzednie taski."
+
+            - name: Przerwij playbook po bledzie baseline sudo
+              ansible.builtin.fail:
+                msg: "Baseline sudo nie zostal poprawnie zastosowany."
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+          vars:
+            rescue_fail_message: "Baseline sudo nie zostal poprawnie zastosowany."
+
+      always:
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: enforce sudo accounts baseline"

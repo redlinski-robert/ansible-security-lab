@@ -1,0 +1,12 @@
+---
+# Specyficzne dla serwerow edge wersje pakietow.
+
+package_versions_edge:
+  tar: "1.34+dfsg-1ubuntu0.1.22.04.6"
+  xz-utils: "5.2.5-2ubuntu1.1"
+  nginx-core: "1.18.0-6ubuntu14.21"
+  openssl: "3.0.2-0ubuntu1.30"
+  libmodsecurity3: "3.0.6-1"
+
+# Mozna sprawdzic obecna wersje:
+# ansible all -i inventories/hosts.yml -m shell -a "for p in nazwa_pakietu nazwa_pakietu2 ; do echo '---' \$p '---'; dpkg -l \$p 2>/dev/null | grep '^ii' || echo 'not installed'; done" -u ansible --become

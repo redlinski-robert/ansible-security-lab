@@ -1,0 +1,15 @@
+[DEFAULT]
+# 127.0.0.1 - zawsze ignoruj localhost
+# Adres hosta zarzadzany przez Ansible nie powinien zostac zablokowany.
+ignoreip = 127.0.0.1 {{ master_ip }}
+
+bantime   = 1h
+findtime  = 15m
+maxretry  = 3
+banaction = nftables-multiport
+
+[sshd]
+enabled = true
+port    = {{ ansible_port | default(22) }}
+logpath = %(sshd_log)s
+backend = %(sshd_backend)s

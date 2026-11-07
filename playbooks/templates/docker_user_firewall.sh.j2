@@ -1,0 +1,70 @@
+#!/bin/bash
+set -euo pipefail
+
+IPTABLES="${IPTABLES:-iptables}"
+CHAIN="ANSIBLE-DOCKER-FW"
+
+# Poczekaj, az Docker utworzy lancuch DOCKER-USER.
+for _ in $(seq 1 30); do
+    if "${IPTABLES}" -w -S DOCKER-USER >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+
+if ! "${IPTABLES}" -w -S DOCKER-USER >/dev/null 2>&1; then
+    echo "ERROR: Brak lancucha DOCKER-USER." >&2
+    exit 1
+fi
+
+# Utworz lancuch zarzadzany przez Ansible, jezeli jeszcze nie istnieje.
+"${IPTABLES}" -w -N "${CHAIN}" 2>/dev/null || true
+
+# Usun ewentualne stare/zdublowane skoki do naszego lancucha.
+while "${IPTABLES}" -w -C DOCKER-USER -j "${CHAIN}" 2>/dev/null; do
+    "${IPTABLES}" -w -D DOCKER-USER -j "${CHAIN}"
+done
+
+# Odtworz tylko lancuch zarzadzany przez Ansible.
+"${IPTABLES}" -w -F "${CHAIN}"
+"${IPTABLES}" -w -I DOCKER-USER 1 -j "${CHAIN}"
+
+# Pozwol kontynuowac ruch nalezacy do juz zestawionych polaczen.
+"${IPTABLES}" -w -A "${CHAIN}" \
+    -m conntrack \
+    --ctstate ESTABLISHED,RELATED \
+    -j ACCEPT
+
+{% if let_scanner_hosts_connect | default(true) | bool %}
+# Scanner ma dostep do uslug publikowanych przez Docker.
+{% for scanner_ip in scanner_ip_addrs %}
+"${IPTABLES}" -w -A "${CHAIN}" \
+    -s {{ scanner_ip }} \
+    -j ACCEPT
+{% endfor %}
+{% else %}
+# Scanner jest blokowany przed pozostalymi regulami Docker.
+{% for scanner_ip in scanner_ip_addrs %}
+"${IPTABLES}" -w -A "${CHAIN}" \
+    -s {{ scanner_ip }} \
+    -j DROP
+{% endfor %}
+{% endif %}
+
+{% if edge_ip_addr | length > 0 %}
+# Edge moze laczyc sie bezposrednio z backendem aplikacji.
+"${IPTABLES}" -w -A "${CHAIN}" \
+    -p tcp \
+    -s {{ edge_ip_addr }} \
+    --dport 5000 \
+    -j ACCEPT
+{% endif %}
+
+# Zablokuj pozostaly bezposredni dostep do backendu.
+"${IPTABLES}" -w -A "${CHAIN}" \
+    -p tcp \
+    --dport 5000 \
+    -j DROP
+
+# Pozostaly ruch przekaz z powrotem do standardowych regul Dockera.
+"${IPTABLES}" -w -A "${CHAIN}" -j RETURN

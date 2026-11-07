@@ -1,0 +1,8 @@
+---
+# Domyslne ustawienia uzytkownikow i grup dla grupy red_group.
+# Zmienne ladowane dla wszystkich hostow w red_group.
+
+# Puste override baseline sudo dla red_group (dokladane do *_all)
+baseline_sudo_accounts_check_red: {}
+baseline_sudo_allowed_methods_red: []
+baseline_sudo_known_privileged_groups_red: []

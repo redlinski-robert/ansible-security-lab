@@ -1,0 +1,136 @@
+---
+# Specyficzny dla serwerow edge baseline uprawnien do plikow i katalogow.
+
+# Domyslne wartosci wlascicielskie
+nginx_owner: root
+nginx_group: root
+nginx_runtime_user: www-data
+nginx_log_group: adm
+
+# Baseline uprawnien dla serwerow edge
+permission_baseline_edge:
+  - path: "{{ nginx_conf_d_dir }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0755"
+    state: directory
+
+  - path: "{{ nginx_modsecurity_global_conf }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ nginx_modsecurity_module_path }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ nginx_modsecurity_loader_conf }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ nginx_security_headers_conf }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ nginx_modules_enabled_dir }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0755"
+    state: directory
+
+  - path: "{{ modsecurity_conf_dir }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0750"
+    state: directory
+
+  - path: "{{ modsecurity_engine_conf }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0640"
+    state: file
+
+  - path: "{{ modsecurity_main_conf }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0640"
+    state: file
+
+  - path: "{{ modsecurity_unicode_mapping }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ owasp_crs_dir }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0750"
+    state: directory
+
+  - path: "{{ nginx_owasp_crs_setup_conf }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0640"
+    state: file
+
+  - path: "{{ nginx_modsec_audit_log }}"
+    owner: "{{ nginx_runtime_user }}"
+    group: "{{ nginx_log_group }}"
+    mode: "0640"
+    state: file
+
+  - path: "{{ nginx_modsec_debug_log }}"
+    owner: "{{ nginx_runtime_user }}"
+    group: "{{ nginx_log_group }}"
+    mode: "0640"
+    state: file
+
+  - path: "{{ nginx_apparmor_profile }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0644"
+    state: file
+
+  - path: "{{ nginx_ssl_dir }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0750"
+    state: directory
+
+  - path: "{{ nginx_log_dir }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_log_group }}"
+    mode: "0755"
+    state: directory
+
+  - path: "{{ nginx_error_log_file }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_log_group }}"
+    mode: "0640"
+    state: file
+
+  - path: "{{ nginx_access_log_file }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_log_group }}"
+    mode: "0640"
+    state: file
+
+  - path: "{{ nginx_sites_available_dir }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0755"
+    state: directory
+
+  - path: "{{ nginx_sites_enabled_dir }}"
+    owner: "{{ nginx_owner }}"
+    group: "{{ nginx_group }}"
+    mode: "0755"
+    state: directory

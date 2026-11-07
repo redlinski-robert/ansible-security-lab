@@ -1,0 +1,9 @@
+---
+# Specyficzny dla serwerow red baseline uprawnien do plikow i katalogow.
+
+permission_baseline_red:
+  - path: "{{ netplan_generate_service_file }}"
+    owner: "{{ system_owner }}"
+    group: "{{ system_group }}"
+    mode: "0644"
+    state: file

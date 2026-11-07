@@ -1,0 +1,58 @@
+---
+# Specyficzne dla wszystkich serwerow wersje pakietow.
+
+# Baseline to oczekiwany stan, z ktorym playbooki porownuja host.
+# Ponizej uzywamy slownikow: kluczem jest nazwa pakietu, a wartoscia wersja.
+# Ulatwia to znalezienie wersji po nazwie i zastapienie jej dla danej grupy.
+
+package_versions_all:
+  git: "1:2.34.1-1ubuntu1.17"
+  etckeeper: "1.18.16-1"
+  ufw: "0.36.1-4ubuntu0.1"
+  ca-certificates: "20240203~22.04.1"
+
+# effective powstaje ze slownika wspolnego i slownikow odpowiednich grup.
+
+# group_names jest lista grup biezacego hosta z inventory, np. app nalezy do
+# blue_group i app_servers. Dla kazdej grupy:
+# - `in` sprawdza czlonkostwo, a ternary wybiera jej slownik lub pusty {};
+# - default({}) zastepuje brakujacy slownik pustym, bez zmiany wyniku;
+# - combine laczy slowniki: przy tym samym kluczu wygrywa pozniejszy slownik.
+# recursive=true laczy tez zagniezdzone slowniki. W tej liscie wersji wartosci
+# sa proste. Kolejnosc laczenia jest jawnie ustalona w wyrazeniu, a nie wynika
+# automatycznie z nazw grup: po all i blue/red dokladane sa grupy serwerow.
+
+# Przyklad: dla app wersja ca-certificates z package_versions_app zastepuje
+# wersje z package_versions_all, a git pozostaje wartoscia wspolna.
+package_versions_effective: >-
+  {{
+    package_versions_all
+    | combine(('blue_group' in (group_names | default([]))) | ternary(package_versions_blue | default({}), {}), recursive=true)
+    | combine(('red_group' in (group_names | default([]))) | ternary(package_versions_red | default({}), {}), recursive=true)
+    | combine(('edge_servers' in (group_names | default([]))) | ternary(package_versions_edge | default({}), {}), recursive=true)
+    | combine(('app_servers' in (group_names | default([]))) | ternary(package_versions_app | default({}), {}), recursive=true)
+    | combine(('scanner_servers' in (group_names | default([]))) | ternary(package_versions_scanner | default({}), {}), recursive=true)
+  }}
+
+# Biblioteki PyPI sa kontrolowane osobno od pakietow APT: na app_servers
+# baseline obejmuje Docker SDK zdefiniowany w group_vars/app_servers/30_versions.yml.
+
+# Domyślnie wybranoby Virtualenv do kontroli bibliotek PyPI.
+# Virtualenv to osobny katalog ze srodowiskiem Pythona i wlasnymi bibliotekami;
+
+# W tym labie wybrano prostsze rozwiazanie: instalacje przez pip3 i kontrole
+# przez python3 -m pip, bez virtualenv. Wersje pip3 i python3 musza wskazywac
+# na zgodne srodowisko, a instalacja moze kolidowac z pakietami systemowymi
+python_package_versions_all: {}
+
+# Ten sam sposob laczenia, ale dla pakietow Python: wspolny slownik jest
+# pusty, a dla hosta z app_servers dochodzi python_package_versions_app.
+# Jest to oddzielny baseline od APT, mimo ze oba uzywaja nazw pakietow.
+python_package_versions_effective: >-
+  {{
+    python_package_versions_all
+    | combine(('app_servers' in (group_names | default([]))) | ternary(python_package_versions_app | default({}), {}), recursive=true)
+  }}
+
+# Mozna sprawdzic obecna wersje:
+# ansible all -i inventories/hosts.yml -m shell -a "for p in nazwa_pakietu nazwa_pakietu2 ; do echo '---' \$p '---'; dpkg -l \$p 2>/dev/null | grep '^ii' || echo 'not installed'; done" -u ansible --become

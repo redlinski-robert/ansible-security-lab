@@ -1,0 +1,158 @@
+﻿---
+- name: Instalacja zabbix-agent2 bez serwera Zabbixa + test metryk
+  hosts: blue_group
+  become: true
+  gather_facts: true
+
+  vars:
+    zabbix_major_version: "7.0"
+    zabbix_release_pkg: "/tmp/zabbix-release.deb"
+    zabbix_release_url: "https://repo.zabbix.com/zabbix/{{ zabbix_major_version }}/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest+ubuntu{{ ansible_distribution_version }}_all.deb"
+    zabbix_agent_packages:
+      - "ca-certificates={{ package_versions_effective['ca-certificates'] }}"
+      - "zabbix-agent2={{ package_versions_effective['zabbix-agent2'] }}"
+
+    # Zmienna typu lista
+    zabbix_test_metrics:
+      - "system.cpu.load[all,avg1]"
+      - "vm.memory.size[available]"
+      - "vfs.fs.size[/,free]"
+      - "system.uptime"
+
+ # Dzialanie przed instalacja Zabbixa - test systemu
+ # Modul ansible.builtin.assert konczy task statusem failed, jesli ktorykolwiek
+ # warunek z sekcji that nie jest spelniony.
+  pre_tasks:
+    - name: Sprawdzenie systemu (Ubuntu)
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+        fail_msg: "Ten playbook jest przygotowany pod Ubuntu."
+
+  tasks:
+    - name: Instalacja agenta Zabbixa
+      block:
+        - name: Sprawdz, czy repozytorium Zabbix jest juz dodane
+          ansible.builtin.stat:
+            path: /etc/apt/sources.list.d/zabbix.list
+          register: zabbix_repo_file
+
+        - name: Zdejmij blokade hold dla pakietow wymagajacych zmiany
+          ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+          vars:
+            package_guard_packages: "{{ zabbix_agent_packages }}"
+
+        - name: Zainstaluj pakiet CA przez package_guard_apt
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages:
+              - "ca-certificates={{ package_versions_effective['ca-certificates'] }}"
+            package_guard_apt_update_cache: true
+            package_guard_apt_cache_valid_time: 3600
+
+        - name: Odswiez certyfikaty systemowe
+          ansible.builtin.command: update-ca-certificates
+          changed_when: false
+
+        # Pakiet repozytorium konfiguruje APT na hoscie. Wersja agenta jest
+        # nastepnie wybierana z baseline pakietow.
+        - name: Pobierz pakiet repozytorium Zabbix
+          ansible.builtin.get_url:
+            url: "{{ zabbix_release_url }}"
+            dest: "{{ zabbix_release_pkg }}"
+            mode: "0644"
+          when: not zabbix_repo_file.stat.exists
+
+        - name: Zainstaluj repozytorium Zabbix
+          ansible.builtin.command: dpkg -i {{ zabbix_release_pkg }}
+          args:
+            creates: /etc/apt/sources.list.d/zabbix.list
+          register: zabbix_repo_install
+          when: not zabbix_repo_file.stat.exists
+
+        - name: Odswiez cache APT po dodaniu repo
+          ansible.builtin.apt:
+            update_cache: true
+          when:
+            - not zabbix_repo_file.stat.exists
+            - zabbix_repo_install is changed
+
+        - name: Zainstaluj zabbix-agent2 przez package_guard_apt
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages:
+              - "zabbix-agent2={{ package_versions_effective['zabbix-agent2'] }}"
+            package_guard_apt_update_cache: false
+
+        - name: Ustaw hostname agenta Zabbix
+          ansible.builtin.lineinfile:
+            path: /etc/zabbix/zabbix_agent2.conf
+            regexp: '^#?\s*Hostname='
+            line: "Hostname={{ inventory_hostname }}"
+            owner: root
+            group: root
+            mode: "0644"
+          notify: Restart zabbix-agent2
+
+        # Adres uprawnionego serwera pochodzi z inventory. Agent ma obslugiwac
+        # pasywne zapytania, a active checks sa w tej konfiguracji wylaczone.
+        - name: Zezwol na pasywne zapytania z management
+          ansible.builtin.lineinfile:
+            path: /etc/zabbix/zabbix_agent2.conf
+            regexp: '^#?\s*Server='
+            line: "Server={{ master_ip }}"
+            owner: root
+            group: root
+            mode: "0644"
+          notify: Restart zabbix-agent2
+        
+        # Zadanie do usuniecia, gdy zostanie dodany serwer Zabbix (aktywne sprawdzanie zostanie wlaczone)
+        - name: Wylacz active checks bez serwera Zabbixa
+          ansible.builtin.lineinfile:
+            path: /etc/zabbix/zabbix_agent2.conf
+            regexp: '^#?\s*ServerActive='
+            line: "ServerActive="
+            owner: root
+            group: root
+            mode: "0644"
+          notify: Restart zabbix-agent2
+
+        - name: Wlacz i uruchom usluge zabbix-agent2
+          ansible.builtin.systemd:
+            name: zabbix-agent2
+            enabled: true
+            state: started
+
+        - name: Sprawdz metryki zabbix-agent2
+          ansible.builtin.command: "zabbix_agent2 -t {{ item }}"
+          loop: "{{ zabbix_test_metrics }}"
+          register: zabbix_metric_results
+          changed_when: false
+
+        - name: Wyswietl wyniki testu metryk
+          ansible.builtin.debug:
+            msg: |
+              Metryka: {{ item.item }}
+              Wynik: {{ item.stdout }}
+          loop: "{{ zabbix_metric_results.results }}"
+      
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Ustaw blokade hold dla pakietow
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages: "{{ zabbix_agent_packages }}"
+
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: install_zabbix_agent"
+  handlers:
+    - name: Restart zabbix-agent2
+      ansible.builtin.systemd:
+        name: zabbix-agent2
+        state: restarted
+

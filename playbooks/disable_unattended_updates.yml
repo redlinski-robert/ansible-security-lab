@@ -1,0 +1,112 @@
+---
+- name: Wylaczenie automatycznych aktualizacji (unattended-upgrades)
+  hosts: "{{ disable_unattended_target | default('all') }}"
+  become: true
+  gather_facts: false
+
+  vars:
+    apt_auto_upgrades_file: "/etc/apt/apt.conf.d/20auto-upgrades"
+    # disable_and_stop_apt_services kontroluje cala sciezke bezpieczenstwa odpalania APT.
+    # Jesli jest true, playbook sprawdza stan dpkg, opcjonalnie naprawia pakiety i
+    # wylacza uslugi APT w taki sposob, ze po restarcie nie wroca automatycznie.
+    disable_and_stop_apt_services: true
+    # W przypadku uruchomienia tej sciezki bezpieczenstwa, ustawienia ponizej sa
+    # scisle powiazane z wylaczeniem uslug APT, bo bez zakonczenia aktywnego dpkg
+    # nie wolno przerywac procesu aktualizacji. Jesli dpkg jest aktywny, playbook
+    # umozliwia dalszy przebieg tylko wtedy, gdy configure_pending_packages i
+    # fix_apt_dependencies sa ustawione na true.
+    configure_pending_packages: true
+    fix_apt_dependencies: true
+    apt_hard_stop_services: false
+    service_stop_check_retries: 5
+    service_stop_check_delay: 2
+    ## Dla serwisow:
+    ## apt-daily.timer
+    ## apt-daily-upgrade.timer
+    ## apt-daily.service
+    ## apt-daily-upgrade.service
+    ## unattended-upgrades.service
+
+
+  tasks:
+    # Przy wylaczaniu uslug APT wynik sprawdzenia dpkg decyduje, czy przerwac
+    # przebieg, czy wykonac opcjonalna konfiguracje pakietow i naprawe zaleznosci.
+    - name: Sprawdz, czy dpkg jest aktywnie zajety
+      ansible.builtin.shell: pgrep -x dpkg || true
+      register: dpkg_active
+      changed_when: false
+      when: disable_and_stop_apt_services | bool
+
+    - name: Przerwij, gdy dpkg jest aktywny, ale nie pozwolono na konfiguracje/pomoc APT
+      ansible.builtin.fail:
+        msg: >-
+          Wykryto aktywny proces dpkg na hoscie {{ inventory_hostname }}.
+          Ze wzgledow bezpieczenstwa wylaczenie uslug APT wymaga wlaczenia
+          configure_pending_packages i fix_apt_dependencies, zanim playbook
+          przejdzie do zatrzymania unitow systemd.
+      when:
+        - disable_and_stop_apt_services | bool
+        - dpkg_active.stdout | trim | length > 0
+        - not (configure_pending_packages | default(false) | bool and fix_apt_dependencies | default(false) | bool)
+
+    - name: Skonfiguruj oczekujace pakiety dpkg
+      ansible.builtin.command:
+        argv:
+          - dpkg
+          - --configure
+          - -a
+      when:
+        - disable_and_stop_apt_services | bool
+        - dpkg_active.stdout | trim | length > 0
+        - configure_pending_packages | default(false) | bool
+
+    - name: Napraw zaleznosci pakietow APT
+      ansible.builtin.command:
+        argv:
+          - apt-get
+          - -f
+          - install
+          - -y
+      when:
+        - disable_and_stop_apt_services | bool
+        - dpkg_active.stdout | trim | length > 0
+        - fix_apt_dependencies | default(false) | bool
+
+    # Kolejnosc ma znaczenie: najpierw blokujemy start unitow systemd, aby po restarcie nie
+    # zostaly automatycznie aktywowane, a dopiero potem zapisujemy blokade konfiguracyjna APT.
+    # disable_service: true w helperze oznacza pelne wylaczenie jednostki na starcie i stop aktywnej uslugi.
+    # disable_service: false oznacza tylko normalne zatrzymanie biezacego procesu bez blokowania startu po restarcie.
+    - name: Zatrzymaj i wylacz uslugi automatycznych aktualizacji APT
+      ansible.builtin.include_tasks: tasks/stop_service.yml
+      when: disable_and_stop_apt_services | bool
+      loop:
+        - apt-daily.timer
+        - apt-daily-upgrade.timer
+        - apt-daily.service
+        - apt-daily-upgrade.service
+        - unattended-upgrades.service
+      loop_control:
+        loop_var: apt_unit_name
+        label: "{{ apt_unit_name }}"
+      vars:
+        service_name: "{{ apt_unit_name }}"
+        disable_service: true
+        hard_stop_services: "{{ apt_hard_stop_services | bool }}"
+
+    # Zakladamy w tym scenariuszu, ze dostep do Ansible ma kilku administratorow,
+    # dlatego nie usuwamy ich zmian przy wylaczaniu unattended-upgrades.
+    # Nie mozemy korzystac z copy (opcja w pelni idempotentna - odporna na wszelakie zmiany w pliku)
+    - name: Wylacz automatyczne aktualizacje w konfiguracji APT
+      ansible.builtin.lineinfile:
+        path: "{{ apt_auto_upgrades_file }}"
+        regexp: '^{{ item.key }}'
+        line: '{{ item.key }} "{{ item.value }}";'
+        create: true
+      loop:
+        - { key: 'APT::Periodic::Update-Package-Lists', value: '0' }
+        - { key: 'APT::Periodic::Unattended-Upgrade', value: '0' }
+
+    - name: Dolacz wspolne taski etckeeper
+      ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+      vars:
+        etckeeper_commit_message: "Ansible: disable_unattended_updates"

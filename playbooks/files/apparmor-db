@@ -1,0 +1,27 @@
+#include <tunables/global>
+
+# Profil Redis uruchamianego w kontenerze bazy danych.
+profile apparmor-db flags=(attach_disconnected) {
+  # Podstawowe operacje systemowe i rozpoznawanie nazw hostow.
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  # Redis potrzebuje sieci TCP i prawa do nasluchiwania na porcie.
+  network inet tcp,
+  capability net_bind_service,
+
+  # Skrypt startowy kontenera i proces serwera Redis.
+  /bin/sh ix,
+  /usr/local/bin/docker-entrypoint.sh rix,
+  /usr/local/bin/redis-server ix,
+
+  # Odczyt statystyk procesow wymagany przez narzedzia runtime.
+  /proc/[0-9]*/stat r,
+
+  # Dane trwale Redis przechowywane w katalogu /data.
+  /data/ rw,
+  /data/** rwk,
+
+  # Odczyt ustawienia transparent huge pages przez Redis.
+  /sys/kernel/mm/transparent_hugepage/enabled r,
+}
