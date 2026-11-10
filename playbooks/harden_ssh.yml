@@ -1,0 +1,138 @@
+﻿---
+- name: Utwardzanie SSH i zmiana portu SSH
+  # ssh_target wskazuje zakres migracji: nazwe grupy albo pojedynczego hosta.
+  # Dla grupy post_tasks aktualizuje group_vars/<ssh_target>/vars.yml,
+  # a dla hosta host_vars/<ssh_target>/vars.yml.
+  # --limit ogranicza wykonanie zadan, ale nie ustawia ssh_target.
+  hosts: "{{ ssh_target | default('all') }}"
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+
+  vars:
+    inventory_permission_baseline: "{{ permission_baseline | default([]) }}"
+
+    # Nowy port SSH ustawiany na hostach
+    custom_ssh_port: 2228
+
+    # Katalog inventory, przy ktorym leza group_vars i host_vars
+    inventory_vars_root: "{{ inventory_dir }}"
+
+    # Nazwa pliku vars w katalogach group_vars/<grupa>/ oraz host_vars/<host>/
+    inventory_vars_file: vars.yml
+
+    # Zmienne, ktore maja zostac zapisane do vars.yml po udanej zmianie SSH
+    inventory_ssh_vars:
+      ansible_port: "{{ custom_ssh_port | int }}"
+
+    inventory_group_vars_dir_mode_baseline: >-
+      {{
+        inventory_permission_baseline
+        | selectattr('path', 'equalto', inventory_vars_group_vars_dir)
+        | map(attribute='mode')
+        | list
+        | first
+        | default('0750')
+      }}
+    inventory_host_vars_dir_mode_baseline: >-
+      {{
+        inventory_permission_baseline
+        | selectattr('path', 'equalto', inventory_vars_host_vars_dir)
+        | map(attribute='mode')
+        | list
+        | first
+        | default('0750')
+      }}
+    inventory_root_dir_mode_baseline: >-
+      {{
+        inventory_permission_baseline
+        | selectattr('path', 'equalto', inventory_vars_root)
+        | map(attribute='mode')
+        | list
+        | first
+        | default('0750')
+      }}
+    inventory_hostfile_mode_baseline: >-
+      {{
+        inventory_permission_baseline
+        | selectattr('path', 'equalto', inventory_vars_hostfile)
+        | map(attribute='mode')
+        | list
+        | first
+        | default('0640')
+      }}
+
+  pre_tasks:
+    - name: Sprawdzenie poprawnosci portu SSH
+      ansible.builtin.assert:
+        that:
+          - custom_ssh_port | int > 0
+          - custom_ssh_port | int <= 65535
+        fail_msg: "custom_ssh_port musi byc poprawnym portem TCP z zakresu 1-65535."
+
+    - name: Zebranie informacji o uslugach
+      ansible.builtin.service_facts:
+
+  tasks:
+    - block:
+        # Jesli UFW jest obecny, nowy port jest dopuszczany przed zmiana SSH.
+        # Konfiguracja jest walidowana przez sshd, a dostepnosc portu
+        # sprawdzana z kontrolera przed aktualizacja inventory.
+        - name: Otwarcie nowego portu w firewallu UFW
+          community.general.ufw:
+            rule: allow
+            src: "{{ lab_network_ip }}"
+            port: "{{ custom_ssh_port }}"
+            proto: tcp
+          when:
+            - ansible_facts.services is defined
+            - "'ufw.service' in ansible_facts.services"
+
+        - name: Konfiguracja parametrow sshd_config
+          ansible.builtin.lineinfile:
+            path: "{{ ssh_server_config_file }}"
+            regexp: "{{ item.regexp }}"
+            line: "{{ item.line }}"
+            state: present
+            validate: "/usr/sbin/sshd -t -f %s"
+          loop:
+            - { regexp: '^#?Port\s+', line: "Port {{ custom_ssh_port | int }}" }
+            - { regexp: '^#?MaxAuthTries\s+', line: "MaxAuthTries 3" }
+            - { regexp: '^#?AllowTcpForwarding\s+', line: "AllowTcpForwarding no" }
+            - { regexp: '^#?X11Forwarding\s+', line: "X11Forwarding no" }
+            - { regexp: '^#?LogLevel\s+', line: "LogLevel VERBOSE" }
+
+        - name: Restart uslugi SSH
+          ansible.builtin.systemd:
+            name: "ssh"
+            state: restarted
+
+        - name: Sprawdzenie dostepnosci nowego portu SSH z management node
+          ansible.builtin.wait_for:
+            host: "{{ ansible_host | default(inventory_hostname) }}"
+            port: "{{ custom_ssh_port | int }}"
+            state: started
+            timeout: 30
+          delegate_to: localhost
+          become: false
+          when: ansible_connection | default('ssh') != 'local'
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: harden_ssh"
+  post_tasks:
+    - name: Zaktualizuj ansible_port przez wspolny interfejs inventory
+      ansible.builtin.include_tasks: tasks/update_inventory_variable.yml
+      vars:
+        inventory_update_target_input: "{{ ssh_target | default('all') }}"
+        inventory_update_variable: ansible_port
+        inventory_update_values: "{{ inventory_ssh_vars }}"
+      run_once: true
+
+

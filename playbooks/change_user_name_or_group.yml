@@ -1,0 +1,104 @@
+﻿---
+# PLaybook nie powinien zmieniac uzytkownika Ansible! W trakcie sie wywali.
+# Zamiast tego nalezy skorzystac z create_user.yml (sudo_access_method: "sudoers_user")
+# I nastepnie usunac starego uzytkownika za pomoca delete_old_user.yml
+- name: Migracja uzytkownika - zmiana grupy lub nazwy
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    old_group: "my-test-group"
+    new_group: "my-new-group"
+    old_user: "my-test-user"
+    new_user: "my-new-user"
+    has_sudo: false
+
+  tasks:
+    - name: Migracja uzytkownika
+      block:
+        # Wyniki id i getent pozwalaja wykonac migracje tylko dla istniejacych
+        # kont lub grup i uniknac zmiany na nazwe, ktora jest juz zajeta.
+        - name: Sprawdz, czy stary uzytkownik istnieje
+          command: "id -u {{ old_user }}"
+          register: old_user_check
+          changed_when: false
+          failed_when: false
+
+        - name: Sprawdz, czy nowy uzytkownik istnieje
+          command: "id -u {{ new_user }}"
+          register: new_user_check
+          changed_when: false
+          failed_when: false
+
+        - name: Sprawdz, czy stara grupa istnieje
+          command: "getent group {{ old_group }}"
+          register: old_group_check
+          changed_when: false
+          failed_when: false
+
+        - name: Sprawdz, czy nowa grupa istnieje
+          command: getent group {{ new_group }}
+          register: new_group_check
+          changed_when: false
+          failed_when: false
+
+        - name: Zmiana starej nazwy grypy na nowa
+          # Flaga -n odpowiada za zmiane nazwy grupy
+          command: "groupmod -n {{ new_group }} {{ old_group }}"
+          when:
+            - old_group_check.rc == 0
+            - new_group_check.rc != 0
+
+        - name: Zmiana nazwy uzytkownika i przeniesienie katalogu domowego
+          # Flagi: 
+          # -l zmienia nazwe uzytkownika
+          # -d ustawia nowy katalog domowy uzytkownika
+          # -m przenosi dane ze starego katalogu domowego do nowego
+          command: "usermod -l {{ new_user }} -m -d /home/{{ new_user }} {{ old_user }}"
+          when:
+            - old_user_check.rc == 0
+            - new_user_check.rc != 0
+
+        # Plik sudoers jest aktualizowany tylko, gdy istnieje. Jego tresc
+        # i nazwa musza odpowiadac nowej nazwie uzytkownika.
+        - name: Sprawdz, czy istnieje plik uprawnien sudo dla starego uzytkownika
+          stat:
+            path: /etc/sudoers.d/{{ old_user }}-user
+          register: sudoers_file
+          failed_when: false
+          when: has_sudo | bool
+
+        - name: Zaktualizuj nazwe wewnatrz pliku sudoers
+          replace:
+            path: /etc/sudoers.d/{{ old_user }}-user
+            # Wyjasnienie regexpa:
+            # ^ - dopasuj tylko wystapienie na poczatku linii
+            # regex_escape - escapuje znaki specjalne regexa, aby nazwa uzytkownika byla traktowana doslownie
+            # \b - granica slowa - zapobiega dopasowaniu czesci dluzszej nazwy, np. user1 w user123
+            regexp: '^{{ old_user | regex_escape }}\b'
+            replace: '{{ new_user }}'
+            backup: true
+            # %s sprawia, ze Ansible utworzy plik sudoers w tmp i tam dokona walidacji
+            # Po przeprowadzeniu poprawnej walidacji plik zostanie skopiowany do /etc/sudoers.d/{{ old_user }}-user
+            # Tymczasowy plik z tmp zostanie usuniety po zakonczeniu walidacji (niezaleznie od wyniku)
+            validate: 'visudo -cf %s'
+          when: 
+            - has_sudo | bool
+            - sudoers_file.stat.exists | default(false)
+
+        - name: Zmiana nazwy pliku sudoers
+          command: "mv /etc/sudoers.d/{{ old_user }}-user /etc/sudoers.d/{{ new_user }}-user"
+          when: 
+            - has_sudo | bool
+            - sudoers_file.stat.exists | default(false)
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: change_user_name_or_group"

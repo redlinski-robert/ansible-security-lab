@@ -1,0 +1,85 @@
+---
+# Centralne domyslne ustawienia uzytkownikow i grup uzywane w playbookach
+# Precedencja ladowania zmiennych: host_vars > group_vars (grupy/specjalizacje) > group_vars/all
+
+ansible_user_shell: /bin/bash
+
+# Slownik kont: kluczem jest uzytkownik, a wartosciami sa metoda nadawania
+# sudo i jego grupa podstawowa. Playbook enforce_sudo_baseline.yml korzysta
+# z wyniku *_effective, aby sprawdzic i egzekwowac te ustawienia.
+baseline_sudo_accounts_check_all:
+  ansible:
+    method: sudoers_user
+    group: ansible
+
+  userxyz:
+    method: sudoers_group
+    group: userxyz
+
+  deploy:
+    method: group
+    group: deploy
+
+# Listy zawieraja dozwolone metody oraz znane grupy uprzywilejowane.
+# Sa listami, bo kazda wartosc jest elementem zbioru, a nie para klucz-wartosc.
+baseline_sudo_allowed_methods_all:
+  - group
+  - sudoers_user
+  - sudoers_group
+
+baseline_sudo_known_privileged_groups_all:
+  - sudo
+  - wheel
+  - admin
+
+baseline_sudoers_dir: /etc/sudoers.d
+
+# Usuwa zarzadzane pliki typu: /etc/sudoers.d/<nazwa>-user /etc/sudoers.d/<nazwa>-group
+baseline_sudo_prune_managed_sudoers_files: true
+
+# effective oznacza wartosc wynikowa dla hosta, nie specjalna funkcje Ansible.
+# group_names zawiera jego grupy. ternary wybiera ustawienia danej grupy tylko
+# dla jej czlonkow. default({}) oznacza pusty slownik, gdy zmienna nie istnieje.
+# combine laczy wpisy po nazwie konta, a recursive=true laczy rowniez pola
+# wewnatrz konta. Dla tego samego pola wygrywa pozniejszy slownik: po *_all
+# sa grupy w kolejnosci ponizej, a na koncu opcjonalne ustawienia bez sufiksu.
+baseline_sudo_accounts_check_effective: >-
+  {{
+    baseline_sudo_accounts_check_all
+    | default({})
+    | combine(('blue_group' in (group_names | default([]))) | ternary(baseline_sudo_accounts_check_blue | default({}), {}), recursive=true)
+    | combine(('red_group' in (group_names | default([]))) | ternary(baseline_sudo_accounts_check_red | default({}), {}), recursive=true)
+    | combine(('edge_servers' in (group_names | default([]))) | ternary(baseline_sudo_accounts_check_edge | default({}), {}), recursive=true)
+    | combine(('app_servers' in (group_names | default([]))) | ternary(baseline_sudo_accounts_check_app | default({}), {}), recursive=true)
+    | combine(('scanner_servers' in (group_names | default([]))) | ternary(baseline_sudo_accounts_check_scanner | default({}), {}), recursive=true)
+    | combine(baseline_sudo_accounts_check | default({}), recursive=true)
+  }}
+
+# Dla list zamiast combine uzywane jest +: dokleja elementy, nie nadpisuje
+# calej listy. default([]) oznacza brak dodatkowych elementow, a unique usuwa
+# powtorzenia. Ten sam mechanizm stosuje lista grup uprzywilejowanych ponizej.
+baseline_sudo_allowed_methods_effective: >-
+  {{
+    (
+      baseline_sudo_allowed_methods_all | default([])
+      + (('blue_group' in (group_names | default([]))) | ternary(baseline_sudo_allowed_methods_blue | default([]), []))
+      + (('red_group' in (group_names | default([]))) | ternary(baseline_sudo_allowed_methods_red | default([]), []))
+      + (('edge_servers' in (group_names | default([]))) | ternary(baseline_sudo_allowed_methods_edge | default([]), []))
+      + (('app_servers' in (group_names | default([]))) | ternary(baseline_sudo_allowed_methods_app | default([]), []))
+      + (('scanner_servers' in (group_names | default([]))) | ternary(baseline_sudo_allowed_methods_scanner | default([]), []))
+      + (baseline_sudo_allowed_methods | default([]))
+    ) | unique
+  }}
+
+baseline_sudo_known_privileged_groups_effective: >-
+  {{
+    (
+      baseline_sudo_known_privileged_groups_all | default([])
+      + (('blue_group' in (group_names | default([]))) | ternary(baseline_sudo_known_privileged_groups_blue | default([]), []))
+      + (('red_group' in (group_names | default([]))) | ternary(baseline_sudo_known_privileged_groups_red | default([]), []))
+      + (('edge_servers' in (group_names | default([]))) | ternary(baseline_sudo_known_privileged_groups_edge | default([]), []))
+      + (('app_servers' in (group_names | default([]))) | ternary(baseline_sudo_known_privileged_groups_app | default([]), []))
+      + (('scanner_servers' in (group_names | default([]))) | ternary(baseline_sudo_known_privileged_groups_scanner | default([]), []))
+      + (baseline_sudo_known_privileged_groups | default([]))
+    ) | unique
+  }}

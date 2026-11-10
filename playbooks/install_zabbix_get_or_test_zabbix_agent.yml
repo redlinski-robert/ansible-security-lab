@@ -1,0 +1,298 @@
+﻿---
+- name: Przygotuj zabbix-get na kontrolerze Ansible
+  # Pierwszy play dziala lokalnie, a pozostale zmieniaja tymczasowo ustawienia
+  # agentow i sprawdzaja ich odpowiedz za pomoca zabbix-get z kontrolera.
+  hosts: localhost
+  connection: local
+  become: false
+  # Fakty sa zbierane tylko w bloku instalacji, aby nie spowalniac kolejnych testow.
+  gather_facts: false
+
+  vars:
+    zabbix_branch: "7.0"
+    supported_ubuntu_versions:
+      - "20.04"
+      - "22.04"
+      - "24.04"
+
+  pre_tasks:
+    # Obecnosc binarki oznacza, ze instalacje i konfiguracje repozytorium mozna pominac.
+    - name: Sprawdz czy zabbix-get jest dostepny
+      ansible.builtin.command: zabbix_get --version
+      register: zabbix_get_binary
+      changed_when: false
+      failed_when: false
+
+  tasks:
+    - name: Zainstaluj zabbix-get gdy nie jest dostepny
+      block:
+        - name: Zbierz fakty kontrolera
+          ansible.builtin.setup:
+            gather_subset:
+              - min
+
+        - name: Zweryfikuj obslugiwany system kontrolera
+          ansible.builtin.assert:
+            that:
+              - ansible_distribution == 'Ubuntu'
+              - ansible_distribution_version in supported_ubuntu_versions
+            fail_msg: >-
+              Unsupported local OS/version: {{ ansible_distribution }} {{ ansible_distribution_version }}.
+              Supported Ubuntu versions: {{ supported_ubuntu_versions | join(', ') }}.
+
+        - name: Zainstaluj wymagane pakiety przez package_guard_apt
+          ansible.builtin.include_tasks:
+            file: tasks/package_guard_apt.yml
+            apply:
+              become: true
+          vars:
+            package_guard_packages:
+              - wget
+              - ca-certificates
+              - gnupg
+              - lsb-release
+            package_guard_apt_update_cache: true
+            package_guard_apt_cache_valid_time: 3600
+            package_guard_apt_retries: 5
+            package_guard_apt_delay: 15
+
+        - name: Pobierz pakiet repozytorium Zabbix
+          ansible.builtin.get_url:
+            url: "https://repo.zabbix.com/zabbix/{{ zabbix_branch }}/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_{{ zabbix_branch }}+ubuntu{{ ansible_distribution_version }}_all.deb"
+            dest: "/tmp/zabbix-release_latest_{{ zabbix_branch }}+ubuntu{{ ansible_distribution_version }}_all.deb"
+            mode: "0644"
+
+        - name: Zainstaluj repozytorium Zabbix
+          ansible.builtin.apt:
+            deb: "/tmp/zabbix-release_latest_{{ zabbix_branch }}+ubuntu{{ ansible_distribution_version }}_all.deb"
+          become: true
+
+        - name: Odswiez metadane pakietow po dodaniu repozytorium
+          ansible.builtin.apt:
+            update_cache: true
+          become: true
+
+        - name: Zainstaluj zabbix-get przez package_guard_apt
+          ansible.builtin.include_tasks:
+            file: tasks/package_guard_apt.yml
+            apply:
+              become: true
+          vars:
+            package_guard_packages:
+              - zabbix-get
+            package_guard_apt_update_cache: false
+
+        - name: Zweryfikuj zainstalowane zabbix-get
+          ansible.builtin.command: zabbix_get --version
+          changed_when: false
+
+        - name: Usun pobrany pakiet repozytorium
+          ansible.builtin.file:
+            path: "/tmp/zabbix-release_latest_{{ zabbix_branch }}+ubuntu{{ ansible_distribution_version }}_all.deb"
+            state: absent
+      when: zabbix_get_binary.rc != 0
+
+- name: Tymczasowe umozliwienie hostowi Ansible Master wysylania zapytan do agentow
+  # Agent Zabbixa jest instalowany tylko na edge i app.
+  hosts: blue_group
+  become: true
+  gather_facts: false
+  # Ignoruje forks i uruchamia playbooka po jednym hoscie na raz
+  serial: 1
+
+  vars:
+    # present: dodaj IP Zabbixa do Server= i wykonaj test; absent: przywroc Server= z backupu.
+    zabbix_state: present
+    # Pozwala wylaczyc samo wywolanie zabbix_get, zachowujac przygotowanie lub rollback konfiguracji.
+    zabbix_run_test: true
+    # Na kazdym agencie przechowuje pierwotna wartosc Server= na czas testu.
+    zabbix_backup_dir: "/etc/zabbix/ansible-backup"
+
+  tasks:
+
+    - name: Tymczasowe umozliwienie hostowi Ansible Master wysylania zapytan do agentow
+      block:
+
+        - name: Sprawdz czy zabbix_agent2 config istnieje
+          ansible.builtin.stat:
+            path: /etc/zabbix/zabbix_agent2.conf
+          register: zabbix_agent2_conf
+    
+        - name: Sprawdz, czy zabbix_agentd config exists
+          ansible.builtin.stat:
+            path: /etc/zabbix/zabbix_agentd.conf
+          register: zabbix_agentd_conf
+    
+        - name: Wybierz config i usluge
+          ansible.builtin.set_fact:
+            zabbix_conf_path: >-
+              {{
+                '/etc/zabbix/zabbix_agent2.conf'
+                if zabbix_agent2_conf.stat.exists
+                else '/etc/zabbix/zabbix_agentd.conf'
+              }}
+            zabbix_service_name: >-
+              {{
+                'zabbix-agent2'
+                if zabbix_agent2_conf.stat.exists
+                else 'zabbix-agent'
+              }}
+    
+        - name: Weryfikacja obecnosci pliku konfiguracyjnego agenta Zabbix
+          ansible.builtin.fail:
+            msg: "Nie znaleziono /etc/zabbix/zabbix_agent2.conf ani /etc/zabbix/zabbix_agentd.conf"
+          when:
+            - not zabbix_agent2_conf.stat.exists
+            - not zabbix_agentd_conf.stat.exists
+
+        - name: Weryfikacja obecnosci katalogu zapasowego
+          ansible.builtin.file:
+            path: "{{ zabbix_backup_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "{{ permission_baseline_blue | selectattr('path','equalto', zabbix_backup_dir) | map(attribute='mode') | list | first | default('0750') }}"
+    
+        - name: Ustawienie sciezki pliku zapasowego
+          ansible.builtin.set_fact:
+            zabbix_backup_file: "{{ zabbix_backup_dir }}/{{ zabbix_service_name }}.server.original"
+    
+        - name: Wczytanie obecnej w konfiguracji wartosci Server
+          ansible.builtin.shell: >-
+            grep -E '^[[:space:]]*Server[[:space:]]*=' {{ zabbix_conf_path | quote }}
+            | head -n1
+            | sed -E 's/^[[:space:]]*Server[[:space:]]*=[[:space:]]*//'
+          register: zabbix_server_value
+          changed_when: false
+    
+        - name: Przypisanie obecnej wartosci Server do zmiennej
+          ansible.builtin.set_fact:
+            zabbix_current_server: "{{ zabbix_server_value.stdout | trim }}"
+    
+        - name: Sprawdzenie obecnej wartosci parametru Server (debug)
+          ansible.builtin.debug:
+            var: zabbix_current_server
+    
+        - name: Blad - Brak parametru Server w pliku konfiguracyjnym
+          ansible.builtin.fail:
+            msg: "Nie znaleziono parametru Server= w {{ zabbix_conf_path }}"
+          when: zabbix_current_server | length == 0
+    
+        # Agent akceptuje pasywne zapytania tylko z adresow wskazanych w Server=.
+        - name: Nadpisanie nowej wartosci dla Server (z vars)
+          ansible.builtin.set_fact:
+            zabbix_new_server: >-
+              {{
+                zabbix_current_server
+                if zabbix_management_ip in zabbix_current_server
+                else zabbix_current_server ~ ',' ~ zabbix_management_ip
+              }}
+    
+        - name: Sprawdzenie nowej wartosci parametru Server (debug)
+          ansible.builtin.debug:
+            var: zabbix_new_server
+    
+        # Oryginalna wartosc Server jest zapisywana przed tymczasowa zmiana,
+        # aby po tescie mozna bylo przywrocic ja z kopii zapasowej.
+        - name: Zapisanie kopii zapasowej pliku z oryginalna wartoscia Server
+          ansible.builtin.copy:
+            dest: "{{ zabbix_backup_file }}"
+            content: "{{ zabbix_current_server }}\n"
+            owner: root
+            group: root
+            mode: "0600"
+            force: false
+          when: zabbix_state == "present"
+    
+        - name: Tymczasowe nadpisanie wartosci Server
+          ansible.builtin.lineinfile:
+            path: "{{ zabbix_conf_path }}"
+            regexp: '^Server\s*='
+            line: "Server={{ zabbix_new_server }}"
+            backup: true
+          when: zabbix_state == "present"
+          notify: restart zabbix agent
+    
+        - name: Wymuszenie wykonania handlerow (flush)
+          ansible.builtin.meta: flush_handlers
+
+        - name: Testy agent.ping z mastera Ansible
+          ansible.builtin.command:
+            cmd: >-
+              zabbix_get -s {{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}
+              -k agent.ping
+            # zabbix_get dziala na kontrolerze, ale zapytanie jest kierowane do biezacego agenta.
+          delegate_to: localhost
+          become: false
+          register: zabbix_get_test
+          changed_when: false
+          when:
+            - zabbix_state == "present"
+            - zabbix_run_test | bool
+    
+        - name: Sprawdzenie statusu zabbix_get (wynik 1)
+          ansible.builtin.assert:
+            that:
+              - zabbix_get_test.stdout | trim == '1'
+            fail_msg: "zabbix_get nie zwrocil 1 dla {{ inventory_hostname }}. Output: {{ zabbix_get_test.stdout | default('') }} {{ zabbix_get_test.stderr | default('') }}"
+            success_msg: "zabbix_get dziala poprawnie dla {{ inventory_hostname }}"
+          when:
+            - zabbix_state == "present"
+            - zabbix_run_test | bool
+    
+        - name: Sprawdzenie obecnosci pliku backup (rollback)
+          ansible.builtin.stat:
+            path: "{{ zabbix_backup_file }}"
+          register: zabbix_backup_stat
+          when: zabbix_state == "absent"
+    
+        - name: Blad - plik backupa nie istnieje
+          ansible.builtin.fail:
+            msg: "Brak pliku backupu {{ zabbix_backup_file }}. Nie ma czego przywrocic."
+          when:
+            - zabbix_state == "absent"
+            - not zabbix_backup_stat.stat.exists
+    
+        - name: Wczytanie oryginalnej wartosci Server z backupu
+          ansible.builtin.slurp:
+            path: "{{ zabbix_backup_file }}"
+          register: zabbix_backup_raw
+          when: zabbix_state == "absent"
+    
+        - name: Przywracanie oryginalnej wartosci server
+          ansible.builtin.lineinfile:
+            path: "{{ zabbix_conf_path }}"
+            regexp: '^Server\s*='
+            line: "Server={{ (zabbix_backup_raw.content | b64decode).splitlines()[0] | trim }}"
+            backup: true
+          when: zabbix_state == "absent"
+          notify: restart zabbix agent
+    
+        - name: Wymuszenie wykonania handlerow (flush) po rollbacku
+          ansible.builtin.meta: flush_handlers
+
+        - name: Usuniecie pliku zapasowego po przywroceniu wartosci Server
+          ansible.builtin.file:
+            path: "{{ zabbix_backup_file }}"
+            state: absent
+          when: zabbix_state == "absent"
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Wymuszenie wykonania handlerow (flush) przed commitem
+          ansible.builtin.meta: flush_handlers
+
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: install_zabbix_get_or_test_zabbix_agent"
+  handlers:
+    - name: restart zabbix agent
+      ansible.builtin.service:
+        name: "{{ zabbix_service_name }}"
+        state: restarted
+            
+

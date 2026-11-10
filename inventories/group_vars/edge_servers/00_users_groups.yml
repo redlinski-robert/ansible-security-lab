@@ -1,0 +1,7 @@
+---
+# Specyficzne dla serwerow edge ustawienia uzytkownikow i grup.
+
+# Puste override baseline sudo dla edge_servers (dokladane do *_all)
+baseline_sudo_accounts_check_edge: {}
+baseline_sudo_allowed_methods_edge: []
+baseline_sudo_known_privileged_groups_edge: []

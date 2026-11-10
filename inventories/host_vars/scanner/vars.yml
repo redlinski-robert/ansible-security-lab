@@ -1,0 +1,5 @@
+﻿ansible_host: __UZUPELNIJ_IP_SCANNER__
+ansible_user: __UZUPELNIJ_UZYTKOWNIK_RED__
+ansible_ssh_private_key_file: __UZUPELNIJ_SCIEZKE_KLUCZA_SSH__
+ansible_python_interpreter: /usr/local/bin/python3.10
+ansible_port: 2228

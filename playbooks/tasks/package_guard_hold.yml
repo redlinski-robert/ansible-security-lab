@@ -1,0 +1,50 @@
+---
+# package_guard_hold.yml
+#
+# Hold jest ustawiany tylko dla pakietu faktycznie i poprawnie
+# zainstalowanego, czyli takiego, ktorego ${Status} konczy sie na:
+#   ok installed
+#
+# Nie ustawiamy hold dla stanow niepelnych lub usunietych, np.:
+#   config-files, not-installed, unpacked, half-installed,
+#   half-configured, triggers-awaited, triggers-pending, reinstreq.
+# Zapobiega to powstawaniu stanow typu "hold ok config-files".
+
+- name: Sprawdz stan i wersje pakietow przed hold
+  ansible.builtin.command:
+    argv:
+      - dpkg-query
+      - -W
+      - '-f=${Status}|${Version}'
+      - "{{ item.split('=')[0] }}"
+  loop: "{{ package_guard_packages }}"
+  register: package_guard_hold_versions
+  changed_when: false
+  failed_when: false
+
+- name: Sprawdz blokady hold pakietow przed hold
+  ansible.builtin.command:
+    argv:
+      - dpkg
+      - --get-selections
+      - "{{ item.split('=')[0] }}"
+  loop: "{{ package_guard_packages }}"
+  register: package_guard_selections
+  changed_when: false
+  failed_when: false
+
+- name: Ustaw blokade hold tylko dla poprawnie zainstalowanych pakietow
+  ansible.builtin.dpkg_selections:
+    name: "{{ item.split('=')[0] }}"
+    selection: hold
+  register: package_guard_set_hold_status
+  until: package_guard_set_hold_status is succeeded
+  retries: 5
+  delay: 5
+  loop: "{{ package_guard_packages }}"
+  loop_control:
+    index_var: package_guard_index
+  when:
+    - package_guard_hold_versions.results[package_guard_index].rc == 0
+    - "' ok installed|' in (package_guard_hold_versions.results[package_guard_index].stdout | default(''))"
+    - not (package_guard_selections.results[package_guard_index].stdout | default('') | trim is search('\\bhold$'))

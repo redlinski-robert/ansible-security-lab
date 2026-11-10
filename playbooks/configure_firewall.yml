@@ -1,0 +1,354 @@
+﻿# ============================================================
+# WSPOLNA BAZA UFW
+# ============================================================
+- name: Wspolna baza regul UFW dla zarzadzanych hostow lab
+  hosts: blue_group
+  become: true
+  gather_facts: true
+
+  vars:
+    lab_network: "{{ lab_network_ip }}"
+    nat_gateway: "{{ nat_gateway_ip }}"
+    ssh_port: "{{ ansible_port }}"
+    master_ip_addr: "{{ master_ip | default(hostvars['management']['ansible_host'] | default('')) }}"
+    edge_ip_addr: "{{ hostvars['edge']['ansible_host'] | default(groups['edge_servers'] | map('extract', hostvars, 'ansible_host') | first | default('')) }}"
+    scanner_ip_addrs: "{{ groups['scanner_servers'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+    app_ip_addrs: "{{ groups['app_servers'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+    zabbix_agent_port_num: "{{ zabbix_agent_port | default(10050) }}"
+
+  tasks:
+    - name: Konfiguracja UFW z pelnym cyklem hold
+      block:
+        - name: Zdejmij blokade hold dla pakietu wymagajacego zmiany
+          ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+          vars:
+            package_guard_packages: ["ufw={{ package_versions_effective['ufw'] }}"]
+
+        - name: Instalacja UFW jesli wymaga zmiany
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages: ["ufw={{ package_versions_effective['ufw'] }}"]
+            package_guard_apt_update_cache: true
+
+        # Adresy sieci i port SSH pochodza z inventory. Reguly SSH sa
+        # przygotowywane przed ustawieniem domyslnej polityki deny.
+        - name: Zezwol na SSH z sieci host-only
+          community.general.ufw:
+            rule: allow
+            src: "{{ lab_network }}"
+            port: "{{ ssh_port }}"
+            proto: tcp
+
+        - name: Zezwol na SSH z NAT gateway
+          community.general.ufw:
+            rule: allow
+            src: "{{ nat_gateway }}"
+            port: "{{ ssh_port }}"
+            proto: tcp
+
+        - name: Ustaw domyslna polityke przychodzaca na deny
+          community.general.ufw:
+            direction: incoming
+            policy: deny
+
+        - name: Ustaw domyslna polityke wychodzaca na allow
+          community.general.ufw:
+            direction: outgoing
+            policy: allow
+
+        - name: Wlacz logowanie UFW
+          community.general.ufw:
+            logging: "on"
+
+      always:
+        - name: Ustaw blokade hold dla pakietu
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages: ["ufw={{ package_versions_effective['ufw'] }}"]
+
+# ============================================================
+# EDGE
+# ============================================================
+- name: Reguly UFW dla serwerow edge
+  hosts: edge_servers
+  become: true
+  gather_facts: false
+
+  vars:
+    lab_network: "{{ lab_network_ip }}"
+    nat_gateway: "{{ nat_gateway_ip }}"
+    master_ip_addr: "{{ master_ip | default(hostvars['management']['ansible_host'] | default('')) }}"
+    zabbix_agent_port_num: "{{ zabbix_agent_port | default(10050) }}"
+    https_port_num: "{{ https_port | default(443) }}"
+    scanner_ip_addrs: "{{ groups['scanner_servers'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+    scanner_desired_rule: "{{ 'allow' if (let_scanner_hosts_connect | default(true) | bool) else 'deny' }}"
+    scanner_opposite_rule: "{{ 'deny' if (let_scanner_hosts_connect | default(true) | bool) else 'allow' }}"
+
+  tasks:
+    - name: Usun przeciwna regule scannerow na edge
+      community.general.ufw:
+        rule: "{{ scanner_opposite_rule }}"
+        src: "{{ scanner_ip }}"
+        proto: tcp
+        delete: true
+      loop: "{{ scanner_ip_addrs }}"
+      loop_control: {loop_var: scanner_ip, label: "{{ scanner_ip }}"}
+      when: scanner_ip_addrs | length > 0
+      failed_when: false
+
+    # Kolejnosc regul ma znaczenie: wpisy skanera musza wyprzedzac reguly
+    # ogolne. W razie potrzeby sa usuwane i dodawane ponownie na poczatku.
+    - name: Sprawdz czy reguly scannerow na edge sa przed ogolnymi regulami UFW
+      ansible.builtin.shell: |
+        set -o pipefail
+        ufw status numbered \
+          | grep -E '^[[:space:]]*\[[[:space:]]*[0-9]+\]' \
+          | head -n {{ scanner_ip_addrs | length }} \
+          | grep -F "{{ scanner_ip }}" \
+          | grep -q "{{ scanner_desired_rule | upper }}"
+      args: {executable: /bin/bash}
+      loop: "{{ scanner_ip_addrs }}"
+      loop_control: {loop_var: scanner_ip, label: "{{ scanner_ip }}"}
+      register: scanner_edge_rule_check
+      changed_when: false
+      failed_when: false
+      when: scanner_ip_addrs | length > 0
+
+    - name: Ustal czy trzeba przebudowac reguly scannerow na edge
+      ansible.builtin.set_fact:
+        scanner_edge_rules_rebuild: "{{ (scanner_edge_rule_check.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length) > 0 }}"
+      changed_when: false
+
+    - name: Usun stara regule docelowa scannerow na edge przed zmiana kolejnosci
+      community.general.ufw:
+        rule: "{{ scanner_desired_rule }}"
+        src: "{{ scanner_ip }}"
+        proto: tcp
+        delete: true
+      loop: "{{ scanner_ip_addrs }}"
+      loop_control: {loop_var: scanner_ip, label: "{{ scanner_ip }}"}
+      when: ["scanner_edge_rules_rebuild | default(false) | bool", "scanner_ip_addrs | length > 0"]
+      failed_when: false
+
+    - name: Ustaw docelowa regule scannerow na poczatku UFW edge
+      community.general.ufw:
+        rule: "{{ scanner_desired_rule }}"
+        src: "{{ scanner_ip }}"
+        proto: tcp
+        insert: 1
+      loop: "{{ scanner_ip_addrs }}"
+      loop_control: {loop_var: scanner_ip, label: "{{ scanner_ip }}"}
+      when: ["scanner_edge_rules_rebuild | default(false) | bool", "scanner_ip_addrs | length > 0"]
+
+    - name: Zezwol serwerowi master Zabbix na agenta Zabbix na edge
+      community.general.ufw:
+        rule: allow
+        src: "{{ master_ip_addr }}"
+        port: "{{ zabbix_agent_port_num }}"
+        proto: tcp
+      when: master_ip_addr | length > 0
+
+    - name: Zezwol na HTTPS do nginx na edge z sieci lab
+      community.general.ufw:
+        rule: allow
+        src: "{{ lab_network }}"
+        port: "{{ https_port_num }}"
+        proto: tcp
+
+    - name: Zezwol desktopowi na HTTP wymagane do przekierowania na HTTPS
+      community.general.ufw:
+        rule: allow
+        src: "{{ lab_network }}"
+        port: "80"
+        proto: tcp
+        comment: "Desktop HTTP redirect to HTTPS"
+
+    - name: Zezwol na HTTPS do nginx na edge z NAT gateway
+      community.general.ufw:
+        rule: allow
+        src: "{{ nat_gateway }}"
+        port: "{{ https_port_num }}"
+        proto: tcp
+
+# ============================================================
+# APP
+# ============================================================
+- name: Reguly UFW i Docker dla serwerow app
+  hosts: app_servers
+  become: true
+  gather_facts: false
+
+  vars:
+    master_ip_addr: "{{ master_ip | default(hostvars['management']['ansible_host'] | default('')) }}"
+    edge_ip_addr: "{{ hostvars['edge']['ansible_host'] | default(groups['edge_servers'] | map('extract', hostvars, 'ansible_host') | first | default('')) }}"
+    zabbix_agent_port_num: "{{ zabbix_agent_port | default(10050) }}"
+    frontend_port_num: "{{ frontend_port | default(8443) }}"
+    scanner_ip_addrs: "{{ groups['scanner_servers'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+    scanner_desired_rule: "{{ 'allow' if (let_scanner_hosts_connect | default(true) | bool) else 'deny' }}"
+    scanner_opposite_rule: "{{ 'deny' if (let_scanner_hosts_connect | default(true) | bool) else 'allow' }}"
+
+  tasks:
+    - name: Usun przeciwna regule scannerow na app
+      community.general.ufw:
+        rule: "{{ scanner_opposite_rule }}"
+        src: "{{ scanner_ip }}"
+        proto: tcp
+        delete: true
+      loop: "{{ scanner_ip_addrs }}"
+      loop_control: {loop_var: scanner_ip, label: "{{ scanner_ip }}"}
+      when: scanner_ip_addrs | length > 0
+      failed_when: false
+
+    - name: Sprawdz czy reguly scannerow na app sa przed ogolnymi regulami UFW
+      ansible.builtin.shell: |
+        set -o pipefail
+        ufw status numbered \
+          | grep -E '^[[:space:]]*\[[[:space:]]*[0-9]+\]' \
+          | head -n {{ scanner_ip_addrs | length }} \
+          | grep -F "{{ scanner_ip }}" \
+          | grep -q "{{ scanner_desired_rule | upper }}"
+      args: {executable: /bin/bash}
+      loop: "{{ scanner_ip_addrs }}"
+      loop_control: {loop_var: scanner_ip, label: "{{ scanner_ip }}"}
+      register: scanner_app_rule_check
+      changed_when: false
+      failed_when: false
+      when: scanner_ip_addrs | length > 0
+
+    - name: Ustal czy trzeba przebudowac reguly scannerow na app
+      ansible.builtin.set_fact:
+        scanner_app_rules_rebuild: "{{ (scanner_app_rule_check.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length) > 0 }}"
+      changed_when: false
+
+    - name: Usun stara regule docelowa scannerow na app przed zmiana kolejnosci
+      community.general.ufw:
+        rule: "{{ scanner_desired_rule }}"
+        src: "{{ scanner_ip }}"
+        proto: tcp
+        delete: true
+      loop: "{{ scanner_ip_addrs }}"
+      loop_control: {loop_var: scanner_ip, label: "{{ scanner_ip }}"}
+      when: ["scanner_app_rules_rebuild | default(false) | bool", "scanner_ip_addrs | length > 0"]
+      failed_when: false
+
+    - name: Ustaw docelowa regule scannerow na poczatku UFW app
+      community.general.ufw:
+        rule: "{{ scanner_desired_rule }}"
+        src: "{{ scanner_ip }}"
+        proto: tcp
+        insert: 1
+      loop: "{{ scanner_ip_addrs }}"
+      loop_control: {loop_var: scanner_ip, label: "{{ scanner_ip }}"}
+      when: ["scanner_app_rules_rebuild | default(false) | bool", "scanner_ip_addrs | length > 0"]
+
+    - name: Zezwol serwerowi master Zabbix na agenta Zabbix na app
+      community.general.ufw:
+        rule: allow
+        src: "{{ master_ip_addr }}"
+        port: "{{ zabbix_agent_port_num }}"
+        proto: tcp
+      when: master_ip_addr | length > 0
+
+    - name: Zezwol nginx na edge na polaczenie do frontendu aplikacji
+      community.general.ufw:
+        rule: allow
+        src: "{{ edge_ip_addr }}"
+        port: "{{ frontend_port_num }}"
+        proto: tcp
+      when: edge_ip_addr | length > 0
+
+    # Trwale reguly DOCKER-USER sa odtwarzane przez systemd po starcie Dockera.
+    # Ruch do kontenerow wymaga dodatkowego lancucha iptables. Szablony
+    # instaluja skrypt i usluge systemd odtwarzajaca reguly Dockera.
+    - name: Wgraj skrypt konfigurujacy firewall Docker
+      ansible.builtin.template:
+        src: ../templates/docker_user_firewall.sh.j2
+        dest: /usr/local/sbin/ansible-docker-firewall.sh
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Wgraj usluge systemd odtwarzajaca firewall Docker
+      ansible.builtin.template:
+        src: ../templates/docker_user_firewall.service.j2
+        dest: /etc/systemd/system/ansible-docker-firewall.service
+        owner: root
+        group: root
+        mode: "0644"
+      register: docker_firewall_service_template
+
+    - name: Przeladuj konfiguracje systemd po zmianie jednostki
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: docker_firewall_service_template.changed
+
+    - name: Wlacz i uruchom usluge trwalego firewalla Docker
+      ansible.builtin.systemd:
+        name: ansible-docker-firewall.service
+        enabled: true
+        state: started
+
+    - name: Wymus stan regul Docker zgodny z konfiguracja Ansible
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/ansible-docker-firewall.sh]
+      changed_when: false
+
+# ============================================================
+# WLACZENIE I WERYFIKACJA
+# ============================================================
+- name: Wlacz i zweryfikuj UFW
+  hosts: blue_group
+  become: true
+  gather_facts: false
+
+  tasks:
+    - block:
+        - name: Wlacz UFW
+          community.general.ufw:
+            state: enabled
+
+        - name: Pokaz status UFW
+          ansible.builtin.command:
+            argv: [ufw, status, numbered]
+          register: ufw_status
+          changed_when: false
+
+        - name: Wypisz status UFW
+          ansible.builtin.debug:
+            var: ufw_status.stdout_lines
+
+        - name: Pokaz reguly DOCKER-USER na hostach app
+          ansible.builtin.command:
+            argv: [iptables, -L, DOCKER-USER, -n, -v, --line-numbers]
+          register: docker_user_status
+          changed_when: false
+          failed_when: false
+          when: inventory_hostname in (groups['app_servers'] | default([]))
+
+        - name: Wypisz reguly DOCKER-USER
+          ansible.builtin.debug:
+            var: docker_user_status.stdout_lines
+          when: ["inventory_hostname in (groups['app_servers'] | default([]))", "docker_user_status is defined", "docker_user_status.rc | default(1) == 0"]
+
+        - name: Pokaz reguly ANSIBLE-DOCKER-FW na hostach app
+          ansible.builtin.command:
+            argv: [iptables, -L, ANSIBLE-DOCKER-FW, -n, -v, --line-numbers]
+          register: ansible_docker_fw_status
+          changed_when: false
+          failed_when: false
+          when: inventory_hostname in (groups['app_servers'] | default([]))
+
+        - name: Wypisz reguly ANSIBLE-DOCKER-FW
+          ansible.builtin.debug:
+            var: ansible_docker_fw_status.stdout_lines
+          when: ["inventory_hostname in (groups['app_servers'] | default([]))", "ansible_docker_fw_status is defined", "ansible_docker_fw_status.rc | default(1) == 0"]
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: configure_firewall"

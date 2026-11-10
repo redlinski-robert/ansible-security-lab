@@ -1,0 +1,8 @@
+---
+# Domyslne ustawienia uzytkownikow i grup dla grupy blue_group.
+# Zmienne ladowane dla wszystkich hostow w blue_group.
+
+# Puste override baseline sudo dla blue_group (dokladane do *_all)
+baseline_sudo_accounts_check_blue: {}
+baseline_sudo_allowed_methods_blue: []
+baseline_sudo_known_privileged_groups_blue: []

@@ -1,0 +1,6 @@
+﻿# Specyficzne dla serwerow blue zmienne.
+environment_description: "Defensywna czesc srodowiska laboratoryjnego"
+netplan_interface: enp0s3
+netplan_install_package: false
+netplan_manage_nat_dhcp4: false
+netplan_migrate_legacy_nat: false

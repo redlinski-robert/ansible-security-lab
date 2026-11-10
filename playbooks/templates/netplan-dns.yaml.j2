@@ -1,0 +1,18 @@
+# Plik zarzadzany przez Ansible.
+network:
+  version: 2
+  renderer: {{ netplan_renderer | default('networkd') }}
+  ethernets:
+    {{ netplan_effective_interface }}:
+{% if netplan_manage_nat_dhcp4 | default(false) | bool %}
+      dhcp4: true
+{% endif %}
+      nameservers:
+        addresses:
+{% for dns_server in netplan_dns_servers %}
+          - {{ dns_server }}
+{% endfor %}
+{% if netplan_ignore_dhcp_dns | default(false) | bool %}
+      dhcp4-overrides:
+        use-dns: false
+{% endif %}

@@ -1,0 +1,71 @@
+#include <tunables/global>
+
+# Profil developerskiego serwera frontendowego Node/Vite.
+profile apparmor-frontend flags=(attach_disconnected) {
+  # Podstawowe operacje systemowe i rozpoznawanie nazw hostow.
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  # Frontend komunikuje sie po TCP z backendem lub serwerem developerskim.
+  network inet tcp,
+
+  # Wymagania sieciowe i capabilities obrazu Node.
+  network,
+  capability,
+
+  # Skrypty startowe oraz interpretery Node/npm.
+  /bin/sh ix,
+  /usr/bin/env ix,
+  /usr/bin/node ix,
+  /usr/local/bin/docker-entrypoint.sh r,
+  /bin/sh ix,
+  /bin/busybox ix,
+  /usr/bin/env ix,
+
+  /usr/local/bin/node ix,
+  /usr/local/bin/npm rix,
+  /usr/local/bin/npx rix,
+  /usr/local/lib/node_modules/** rix,
+  /app/node_modules/.bin/** rix,
+  /etc/ssl/** r,
+  /app/ r,
+  /app/** rw,
+
+  # Cache npm uzywany podczas instalacji lub uruchamiania zaleznosci.
+  /root/.npm/** rwix,
+  /root/.npm/ rwix,
+
+  # Pliki tymczasowe narzedzi Node i bundlera.
+  /tmp/ rw,
+  /tmp/** rw,
+
+  # Dodatkowe binaria i konfiguracja wykorzystywane przez runtime frontendowy.
+  /bin/sh ix,
+  /usr/bin/env ix,
+  /usr/bin/node ix,
+
+  /etc/ssl/openssl.cnf r,
+  /root/.npm/ rw,
+  /root/.npm/** rwk,
+
+  # Kod, zaleznosci i konfiguracja aplikacji frontendowej.
+  /app/node_modules/vite/bin/** ix,
+  /app/node_modules/.bin/vite ix,
+  /app/node_modules/.bin/** ix,
+  /app/node_modules/** r,
+  /app/package.json r,
+  /app/package-lock.json r,
+  /app/index.html r,
+  /app/src/** r,
+  /app/public/** r,
+  /app/node_modules/** m,
+
+  # Odczyt informacji o procesach i cgroup potrzebny narzedziom developerskim.
+  /sys/fs/cgroup/memory* r,
+  /sys/fs/cgroup/cpu* r,
+  /proc/[0-9]*/stat r,
+  /proc/[0-9]*/cgroup r,
+
+  # Tymczasowe pliki poza /tmp, jesli sa uzywane przez narzedzia Node.
+  /var/tmp/** rw,
+}

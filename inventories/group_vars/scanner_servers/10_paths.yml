@@ -1,0 +1,6 @@
+---
+# Specyficzne dla serwerow scanner ustawienia sciezek.
+
+rockyou_path: /usr/share/wordlists/rockyou.txt
+rocktest_path: /usr/share/wordlists/rocktest.txt
+rockyou_path_gz: "{{ rockyou_path }}.gz"

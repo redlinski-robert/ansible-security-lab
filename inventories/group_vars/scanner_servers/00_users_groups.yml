@@ -1,0 +1,8 @@
+---
+# Specyficzne dla serwerow scanner ustawienia uzytkownikow i grup.
+
+
+# Puste override baseline sudo dla scanner_servers (dokladane do *_all)
+baseline_sudo_accounts_check_scanner: {}
+baseline_sudo_allowed_methods_scanner: []
+baseline_sudo_known_privileged_groups_scanner: []

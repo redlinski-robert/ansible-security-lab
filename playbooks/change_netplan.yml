@@ -1,0 +1,329 @@
+---
+- name: Konfiguracja DNS w Netplan
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    netplan_permission_baseline: "{{ permission_baseline | default(permission_baseline_all) | default([]) }}"
+
+    netplan_dns_servers:
+      - 8.8.8.8
+      - 1.1.1.1
+
+    netplan_dns_test_host: security.ubuntu.com
+    
+    # netplan_interface okresla interfejs sieciowy, ktory ma byc uzyty w konfiguracji Netplan
+    # Jezeli nie zostanie ustawiony, interfejs zostanie wykryty na podstawie trasy domyslnej
+    netplan_install_package_effective: >-
+      {{
+        netplan_install_package | default(true) | bool
+        and ansible_distribution | lower == 'kali'
+      }}
+
+  tasks:
+    # Na Kali pakiet moze wymagac instalacji. Wersja pochodzi z inventory.
+    # Wspolne zadania zarzadzaja jego instalacja i blokada aktualizacji.
+    - name: Zdejmij blokade hold przed instalacja netplan.io
+      ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+      vars:
+        package_guard_packages:
+          - "netplan.io={{ package_versions_effective['netplan.io'] }}"
+      when:
+        - netplan_install_package_effective | bool
+
+    - name: Zainstaluj Netplan w ustalonej wersji
+      ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+      vars:
+        package_guard_packages:
+          - "netplan.io={{ package_versions_effective['netplan.io'] }}"
+        package_guard_apt_update_cache: true
+      when:
+        - netplan_install_package_effective | bool
+
+    - name: Ustaw blokade hold dla pakietu netplan.io
+      ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+      vars:
+        package_guard_packages:
+          - "netplan.io={{ package_versions_effective['netplan.io'] }}"
+      when:
+        - netplan_install_package_effective | bool
+
+    # netplan_dns_file jest zdefiniowany w inventories/group_vars/all/10_paths.yml.
+    # Zmienna jest automatycznie ladowana z inventory i moze byc nadpisana w group_vars/host_vars o wyzszej precyzji.
+    - name: Upewnij sie, ze katalog konfiguracji Netplan istnieje
+      ansible.builtin.file:
+        path: "{{ netplan_dns_file | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # Sprawdzenie dostepnosci polecenia Netplan pozwala upewnic sie, ze pakiet
+    # netplan.io jest poprawnie zainstalowany i dostepny w systemie.
+    - name: Sprawdz dostepnosc polecenia Netplan
+      ansible.builtin.command:
+        argv:
+          - netplan
+          - --help
+      changed_when: false
+
+    # Dla sciezki z inventory pobierz pierwszy wpis baseline. Jesli go nie ma,
+    # zastosuj domyslnego wlasciciela, grupe i tryb.
+    - name: Przygotuj zmienne helper dla permission_baseline netplan_dns_file
+      ansible.builtin.set_fact:
+        netplan_dns_file_owner_baseline: >-
+          {{
+            netplan_permission_baseline
+            | selectattr('path', 'equalto', netplan_dns_file)
+            | map(attribute='owner')
+            | list
+            | first
+            | default('root')
+          }}
+        netplan_dns_file_group_baseline: >-
+          {{
+            netplan_permission_baseline
+            | selectattr('path', 'equalto', netplan_dns_file)
+            | map(attribute='group')
+            | list
+            | first
+            | default('root')
+          }}
+
+        netplan_dns_file_mode_baseline: >-
+          {{
+            netplan_permission_baseline
+            | selectattr('path', 'equalto', netplan_dns_file)
+            | map(attribute='mode')
+            | list
+            | first
+            | default('0600')
+          }}
+
+    # Ustalenie interfejsu NAT/default-route
+    #
+    # Jezeli netplan_interface jest ustawiony w group_vars/host_vars,
+    # zostanie uzyta wskazana wartosc.
+    #
+    # Jezeli zmienna jest pusta lub nie istnieje, interfejs zostanie
+    # wykryty na podstawie trasy domyslnej.
+    - name: Wykryj interfejs posiadajacy trase domyslna
+      ansible.builtin.shell: |
+        set -o pipefail
+        ip -4 route show default | awk 'NR == 1 {print $5}'
+      args:
+        executable: /bin/bash
+      register: netplan_detected_interface
+      changed_when: false
+      failed_when:
+        - netplan_detected_interface.rc != 0 or
+          netplan_detected_interface.stdout | trim | length == 0
+      when: netplan_interface | default('') | trim | length == 0
+
+    - name: Ustal interfejs objety konfiguracja DNS
+      ansible.builtin.set_fact:
+        netplan_effective_interface: >-
+          {{
+            (netplan_interface | trim)
+            if (netplan_interface | default('') | trim | length > 0)
+            else (netplan_detected_interface.stdout | trim)
+          }}
+
+    - name: Sprawdz istnienie interfejsu objetego konfiguracja DNS
+      ansible.builtin.stat:
+        path: "/sys/class/net/{{ netplan_effective_interface }}"
+      register: netplan_interface_status
+
+    - name: Zweryfikuj interfejs objety konfiguracja DNS
+      ansible.builtin.assert:
+        that:
+          - netplan_interface_status.stat.exists
+        fail_msg: >-
+          Interfejs {{ netplan_effective_interface }} nie istnieje
+          na hoscie {{ inventory_hostname }}.
+        success_msg: >-
+          Interfejs DNS na {{ inventory_hostname }}:
+          {{ netplan_effective_interface }}
+
+    # Interfejs bywa administracyjnie DOWN po starcie VM (np. swiezo dodany
+    # adapter NAT), a networkd/netplan same z siebie go wtedy nie podnosza.
+    - name: Upewnij sie, ze interfejs objety konfiguracja DNS jest podniesiony
+      ansible.builtin.command:
+        argv:
+          - ip
+          - link
+          - set
+          - "{{ netplan_effective_interface }}"
+          - up
+      changed_when: false
+
+    # Migracja istniejacej konfiguracji NAT systemd-networkd
+    #
+    # Dotyczy Kali.
+    #
+    # Przyklad group_vars:
+    #
+    # netplan_migrate_legacy_nat: true
+    # netplan_legacy_nat_file: /etc/systemd/network/10-nat.network
+    #
+    # /etc/systemd/network/20-hostonly.network pozostaje bez zmian.
+    - name: Sprawdz istniejaca konfiguracje NAT systemd-networkd
+      ansible.builtin.stat:
+        path: "{{ netplan_legacy_nat_file }}"
+      register: netplan_legacy_nat_status
+      when:
+        - netplan_migrate_legacy_nat | default(false) | bool
+        - netplan_legacy_nat_file | default('') | length > 0
+
+    - name: Utworz kopie zapasowa konfiguracji NAT systemd-networkd
+      ansible.builtin.copy:
+        src: "{{ netplan_legacy_nat_file }}"
+        dest: "{{ netplan_legacy_nat_file }}.pre-netplan.bak"
+        remote_src: true
+        owner: root
+        group: root
+        mode: preserve
+        force: false
+      when:
+        - netplan_migrate_legacy_nat | default(false) | bool
+        - netplan_legacy_nat_status.stat.exists | default(false)
+
+    # Konfiguracja DNS:
+    #
+    # Na Ubuntu:
+    # netplan_manage_nat_dhcp4: false
+    # Istniejacy Netplan nadal odpowiada wtedy za DHCP/adresacje,
+    # a ten plik jedynie dodaje konfiguracje DNS.
+    #
+    # Na Kali:
+    # netplan_manage_nat_dhcp4: true
+    # Poniewaz dotychczasowy 10-nat.network zostanie wylaczony,
+
+    - name: Utworz konfiguracje DNS Netplan
+      ansible.builtin.template:
+        src: "templates/netplan-dns.yaml.j2"
+        dest: "{{ netplan_dns_file }}"
+        owner: "{{ netplan_dns_file_owner_baseline }}"
+        group: "{{ netplan_dns_file_group_baseline }}"
+        mode: "{{ netplan_dns_file_mode_baseline }}"
+        backup: true
+      notify:
+        - Sprawdz konfiguracje Netplan
+        - Zastosuj konfiguracje Netplan
+
+    # Kali i inne systemy - wylaczenie starego pliku NAT
+    # Robimy to dopiero po utworzeniu konfiguracji Netplan.
+    # Backup pozostaje jako:
+    # /etc/systemd/network/10-nat.network.pre-netplan.bak
+
+    - name: Wylacz stara konfiguracje NAT systemd-networkd
+      ansible.builtin.file:
+        path: "{{ netplan_legacy_nat_file }}"
+        state: absent
+      when:
+        - netplan_migrate_legacy_nat | default(false) | bool
+        - netplan_legacy_nat_status.stat.exists | default(false)
+      notify:
+        - Sprawdz konfiguracje Netplan
+        - Zastosuj konfiguracje Netplan
+
+    # Na dystrybucjach takich jak Kali Linux generator Netplan w systemd
+    # bywa pomijany przy starcie systemu. Ta usluga oneshot gwarantuje
+    # wygenerowanie konfiguracji dla systemd-networkd przed jego uruchomieniem.
+    - name: Skonfiguruj usluge generowania Netplan przy starcie systemu
+      ansible.builtin.copy:
+        dest: "{{ netplan_generate_service_file }}"
+        # [Unit] sekcja jednostki systemd
+        # [Service] sekcja uslugi systemd
+        # [Install] sekcja instalacji uslugi systemd
+        content: |
+          [Unit]
+          Description=Generate Netplan configuration for networkd
+          DefaultDependencies=no
+          Before=systemd-networkd.service
+          Wants=systemd-networkd.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/sbin/netplan generate
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target network.target
+        owner: "{{ system_owner | default('root') }}"
+        group: "{{ system_group | default('root') }}"
+        mode: "0644"
+      when:
+        - netplan_install_package_effective | bool
+        - netplan_generate_service_file is defined
+
+    # Aby zapewnic poprawne dzialanie sieci po zmianach.
+    - name: Wlacz i uruchom usluge systemd-networkd oraz generator Netplan
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop:
+        - systemd-networkd
+        - netplan-generate.service
+      when: netplan_install_package_effective | bool
+
+    # Wykonanie oczekujacych handlerow Netplan zapewnia, ze zmiany w konfiguracji zostana zastosowane.
+    - name: Wykonaj oczekujace handlery Netplan
+      ansible.builtin.meta: flush_handlers
+
+    # Jesli interfejs sieciowy nie zostal jeszcze skonfigurowany, zastosowanie
+    # konfiguracji Netplan zapewnia jego poprawne dzialanie.
+    # netplan apply wymusza zastosowanie konfiguracji sieciowej natychmiast.
+    - name: Zastosuj konfiguracje Netplan bezposrednio, jesli interfejs nie zostal skonfigurowany
+      ansible.builtin.command:
+        argv:
+          - netplan
+          - apply
+      changed_when: false
+    
+    # Test rozwiazywania nazwy DNS pozwala sprawdzic, czy konfiguracja sieci dziala poprawnie
+    # getent ahosts sprawdza, czy host DNS jest rozpoznawalny przez system.
+    - name: Sprawdz rozwiazywanie nazwy DNS
+      ansible.builtin.command:
+        argv:
+          - getent
+          - ahosts
+          - "{{ netplan_dns_test_host }}"
+      register: dns_test
+      changed_when: false
+      retries: 3
+      delay: 2
+      until:
+        - dns_test.rc == 0
+        - dns_test.stdout | trim | length > 0
+
+    # Pokazanie wyniku testu DNS pozwala zweryfikowac, czy konfiguracja sieci dziala poprawnie.
+    - name: Pokaz wynik testu DNS
+      ansible.builtin.debug:
+        msg: "{{ dns_test.stdout_lines }}"
+
+    - name: Dolacz wspolne taski etckeeper
+      ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+      vars:
+        etckeeper_commit_message: "Ansible: change_netplan"
+
+  handlers:
+
+    # Handler jest zdefiniowany przed apply, wiec konfiguracja
+    # zostanie najpierw zweryfikowana.
+
+    - name: Sprawdz konfiguracje Netplan
+      ansible.builtin.command:
+        argv:
+          - netplan
+          - generate
+      changed_when: false
+
+    - name: Zastosuj konfiguracje Netplan
+      ansible.builtin.command:
+        argv:
+          - netplan
+          - apply

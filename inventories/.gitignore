@@ -1,0 +1,18 @@
+﻿# Ansible Vault files with real secrets
+vault.yml
+secret.yml
+
+# Vault password files
+.vault_passwords
+.vault_pass
+.vault_pass.txt
+vault_pass.txt
+*.vault_pass
+*.pass
+
+# Temporary Ansible files
+*.retry
+*.tmp
+
+# IDE and editor directories
+.vscode/

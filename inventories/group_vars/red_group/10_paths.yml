@@ -1,0 +1,4 @@
+---
+# Specyficzne dla serwerow red ustawienia sciezek.
+
+netplan_generate_service_file: /etc/systemd/system/netplan-generate.service

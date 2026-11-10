@@ -1,0 +1,27 @@
+---
+# Specyficzne dla serwerow edge ustawienia sciezek.
+
+# nginx i modsecurity
+nginx_conf_d_dir: "/etc/nginx/conf.d"
+nginx_modsecurity_global_conf: "{{ nginx_conf_d_dir }}/00-modsecurity.conf"
+nginx_modsecurity_module_path: /usr/lib/nginx/modules/ngx_http_modsecurity_module.so
+nginx_modsecurity_loader_conf: /etc/nginx/modules-enabled/50-mod-http-modsecurity.conf
+nginx_security_headers_conf: "{{ nginx_conf_d_dir }}/10-security-headers.conf"
+nginx_modules_enabled_dir: /etc/nginx/modules-enabled
+nginx_owasp_crs_setup_conf: "{{ owasp_crs_dir }}/crs-setup.conf"
+nginx_modsec_audit_log: /var/log/nginx/modsec_audit.log
+nginx_modsec_debug_log: /var/log/nginx/modsec_debug.log
+nginx_apparmor_profile: /etc/apparmor.d/usr.sbin.nginx
+nginx_ssl_dir: /etc/nginx/ssl
+nginx_log_dir: /var/log/nginx
+nginx_error_log_file: "{{ nginx_log_dir }}/error.log"
+nginx_access_log_file: "{{ nginx_log_dir }}/access.log"
+nginx_sites_available_dir: /etc/nginx/sites-available
+nginx_sites_enabled_dir: /etc/nginx/sites-enabled
+nginx_default_site_enabled_conf: "{{ nginx_sites_enabled_dir }}/default"
+nginx_default_site_available_conf: "{{ nginx_sites_available_dir }}/default"
+modsecurity_conf_dir: /etc/nginx/modsecurity
+modsecurity_engine_conf: /etc/nginx/modsecurity/modsecurity.conf
+modsecurity_main_conf: /etc/nginx/modsecurity/main.conf
+modsecurity_unicode_mapping: /etc/nginx/modsecurity/unicode.mapping
+owasp_crs_dir: /etc/nginx/modsecurity/owasp-crs

@@ -1,0 +1,55 @@
+#include <tunables/global>
+
+# Profil procesu Flask/Python uruchamianego w kontenerze backendu.
+profile apparmor-backend flags=(attach_disconnected) {
+  # Podstawowe operacje systemowe i komunikacja z Redis po nazwie uslugi.
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  # Backend komunikuje sie z Redis i innymi uslugami przez TCP.
+  network inet tcp,
+  network inet stream,
+  network inet6 stream,
+
+  # Skrypt startowy i powloka uzywane do uruchomienia kontenera.
+  /usr/local/bin/docker-entrypoint.sh r,
+  /bin/sh ix,
+  /bin/dash ix,
+  /bin/bash ix,
+  /bin/busybox ix,
+  /usr/bin/env ix,
+
+  # Interpreter Python, pip, Flask oraz biblioteki runtime aplikacji.
+  /usr/local/bin/python ix,
+  /usr/local/bin/python3* ix,
+  /usr/local/bin/python3*/** ix,
+  /usr/local/bin/pip rix,
+  /usr/local/bin/pip3 rix,
+  /usr/local/bin/flask rwix,
+  /usr/local/bin/gunicorn rix,  
+  /usr/local/lib/libpython* rw,
+  /usr/local/lib/python*/** rw,
+  /usr/lib/python*/** rw,
+  /usr/lib/** mr,
+  /usr/local/lib/** mr,
+  /usr/local/bin/python3.9 ix,
+  /usr/local/lib/python3.9/** r,
+  /usr/local/lib/python3.9/site-packages/** r,
+
+  # Dodatkowe sciezki powloki i bibliotek systemu bazowego obrazu.
+  /bin/sh ix,
+  /etc/debian_version r,
+  /etc/ld.so.cache r,
+  /lib/** mr,
+  /etc/ssl/openssl.cnf r,
+  /etc/ssl/** r,
+  /usr/lib/ssl/** r,
+
+  # Kod aplikacji jest dostepny w /app; zapis pozostaje potrzebny dla obrazu developerskiego.
+  /app/ r,
+  /app/** rw,
+
+  # Pliki tymczasowe uzywane przez biblioteki Python i aplikacje.
+  /tmp/ rw,
+  /tmp/** rw,
+}

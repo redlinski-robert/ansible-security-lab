@@ -1,0 +1,147 @@
+﻿---
+- name: Konfiguracja banerow ostrzegawczych (Legal Banner)
+  hosts: blue_group
+  become: yes
+  vars:
+    # Tresc ostrzezenia
+    legal_text: |
+      ***************************************************************************
+      UWAGA! SYSTEM CHRONIONY
+
+      System jest przeznaczony wylacznie dla upowaznionych uzytkownikow.
+
+      Nieuprawnione proby uzyskania dostepu sa zabronione i moga zostac
+      zgloszone wlasciwym organom.
+
+      Dostep do systemu oraz wykonywane operacje sa rejestrowane
+      i analizowane w celach zapewnienia bezpieczenstwa.
+
+      Nieuprawnione uzyskanie dostepu do systemu lub informacji moze skutkowac
+      odpowiedzialnoscia karna, w szczegolnosci na podstawie art. 267
+      Kodeksu karnego.
+
+      Jezeli nie posiadasz uprawnien, natychmiast zakoncz polaczenie.
+
+      ***************************************************************************
+#    legal_text: |
+#      ***************************************************************************
+#      WARNING! PROTECTED SYSTEM
+#      
+#      This system is restricted exclusively to authorized users.
+#      
+#      Unauthorized access attempts are strictly prohibited and may be reported 
+#      to the relevant authorities.
+#      
+#      System access and activities are logged and monitored for security 
+#      purposes.
+#      
+#      Unauthorized access to this system or information may result in criminal 
+#      liability, in particular under Article 267 of the Polish Penal Code.
+#      
+#      If you are not authorized, disconnect immediately.
+#      
+#      ***************************************************************************
+  tasks:
+    - block:
+        # Sciezki pochodza z group_vars/blue_group/10_paths.yml, a wpisy
+        # permission_baseline lacza wspolny baseline z wpisami grup w inventory.
+
+        # Przyklad dla issue_net_owner_baseline:
+        # - selectattr wybiera wpisy, ktorych path jest rowny issue_net_file;
+        # - map pobiera pole owner z kazdego wybranego wpisu;
+        # - list zamienia wynik filtrowania na liste, a last wybiera ostatni
+        #   element. Nie ma tu wartosci domyslnej dla braku pasujacego wpisu.
+
+        # Pozostale wyrazenia dzialaja tak samo dla group, mode i innych sciezek.
+        # run_once wykonuje ten task raz dla pierwszego dostepnego hosta w
+        # biezacej partii - wyznaczone fakty sa stosowane do hostow tej partii.
+        - name: Przygotuj zmienne helper dla permission_baseline
+          ansible.builtin.set_fact:
+            issue_net_owner_baseline: "{{ permission_baseline | selectattr('path','equalto', issue_net_file) | map(attribute='owner') | list | last }}"
+            issue_net_group_baseline: "{{ permission_baseline | selectattr('path','equalto', issue_net_file) | map(attribute='group') | list | last }}"
+            issue_net_mode_baseline: "{{ permission_baseline | selectattr('path','equalto', issue_net_file) | map(attribute='mode') | list | last }}"
+            motd_file_owner_baseline: "{{ permission_baseline | selectattr('path','equalto', motd_file) | map(attribute='owner') | list | last }}"
+            motd_file_group_baseline: "{{ permission_baseline | selectattr('path','equalto', motd_file) | map(attribute='group') | list | last }}"
+            motd_file_mode_baseline: "{{ permission_baseline | selectattr('path','equalto', motd_file) | map(attribute='mode') | list | last }}"
+            update_motd_owner_baseline: "{{ permission_baseline | selectattr('path','equalto', update_motd_file) | map(attribute='owner') | list | last }}"
+            update_motd_group_baseline: "{{ permission_baseline | selectattr('path','equalto', update_motd_file) | map(attribute='group') | list | last }}"
+            update_motd_mode_baseline: "{{ permission_baseline | selectattr('path','equalto', update_motd_file) | map(attribute='mode') | list | last }}"
+          run_once: true
+
+        # SSH wyswietla baner przed logowaniem, a MOTD i PAM obsluguja komunikat
+        # po zalogowaniu. Obie wiadomosci korzystaja z legal_text, a zmiany
+        # konfiguracji SSH zglaszaja handler restartu.
+        - name: Tworzenie pliku banera SSH
+          ansible.builtin.copy:
+            content: "{{ legal_text }}"
+            dest: "{{ issue_net_file }}"
+            owner: "{{ issue_net_owner_baseline }}"
+            group: "{{ issue_net_group_baseline }}"
+            mode: "{{ issue_net_mode_baseline }}"
+
+        - name: Aktywacja banera w konfiguracji SSH
+          ansible.builtin.lineinfile:
+            path: "{{ ssh_server_config_file }}"
+            # ^ oznacza poczatek linii, a #? opcjonalny znak komentarza.
+            # Wyszukujemy wiec zarowno Banner, jak i #Banner. lineinfile
+            # zastepuje ostatnia pasujaca linie albo dodaje ja, gdy brak dopasowania.
+            regexp: '^#?Banner'
+            line: "Banner {{ issue_net_file }}"
+          notify: Restart SSH
+
+        - name: Upewnij sie, ze UsePAM jest wlaczone w SSH
+          ansible.builtin.lineinfile:
+            path: "{{ ssh_server_config_file }}"
+            regexp: '^#?UsePAM'
+            line: 'UsePAM yes'
+          notify: Restart SSH
+
+        - name: Upewnij sie, ze PAM obsluguje dynamiczny MOTD
+          ansible.builtin.lineinfile:
+            path: "{{ pam_sshd }}"
+            # \. oznacza doslowna kropke, a .* dowolny ciag znakow.
+            # Wzor szuka pam_motd.so, po ktorym wystepuje sciezka do
+            # dynamicznego MOTD. Ponizszy wzor szuka opcji noupdate.
+            regexp: 'pam_motd\.so.*motd=/run/motd\.dynamic'
+            line: 'session    optional     pam_motd.so  motd=/run/motd.dynamic'
+            state: present
+
+        - name: Upewnij sie, ze PAM obsluguje statyczny MOTD (/etc/motd)
+          ansible.builtin.lineinfile:
+            path: "{{ pam_sshd }}"
+            regexp: 'pam_motd\.so.*noupdate'
+            line: 'session    optional     pam_motd.so noupdate'
+            state: present
+        
+        - name: Aktualizacja wiadomosci dnia (MOTD)
+          ansible.builtin.copy:
+            content: "{{ legal_text }}"
+            dest: "{{ motd_file }}"
+            owner: "{{ motd_file_owner_baseline }}"
+            group: "{{ motd_file_group_baseline }}"
+            mode: "{{ motd_file_mode_baseline }}"
+
+        - name: Wyciszenie standardowych help-textow Ubuntu
+          ansible.builtin.file:
+            path: "{{ update_motd_file }}"
+            owner: "{{ update_motd_owner_baseline }}"
+            group: "{{ update_motd_group_baseline }}"
+            mode: "{{ update_motd_mode_baseline }}" # Zdjecie bitu wykonywalnosci, aby go ukryc dla systemu
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: add_security_banner"
+  # Handlery sa uzywane do wykonywania okreslonych akcji, takich jak restart uslug, po zakonczeniu taskow w playbooku
+  # Kazdy handler ma unikalna nazwe i okresla akcje do wykonania, np. restart uslugi SSH
+  # Handlery sa wywolywane tylko wtedy, gdy zostana oznaczone jako "notify" w taskach
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: ssh
+        state: restarted

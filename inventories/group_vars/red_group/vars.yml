@@ -1,0 +1,7 @@
+﻿# Specyficzne dla serwerow red zmienne.
+environment_description: "Ofensywna czesc srodowiska laboratoryjnego"
+netplan_interface: eth0
+netplan_install_package: true
+netplan_manage_nat_dhcp4: true
+netplan_migrate_legacy_nat: true
+netplan_legacy_nat_file: /etc/systemd/network/10-nat.network

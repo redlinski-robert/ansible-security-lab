@@ -1,0 +1,232 @@
+﻿---
+- name: Konfiguracja Nginx jako reverse-proxy
+  hosts: edge_servers
+  become: yes
+  # Zmienne dla template jinja
+  vars:
+    nginx_permission_baseline: "{{ permission_baseline | default([]) }}"
+
+    nginx_domain_name: "__UZUPELNIJ_DOMENA_APLIKACJI__"
+    nginx_backend_ip: "__UZUPELNIJ_IP_APP__"
+    # backend wzgledem nginxa, dlatego port frontendu
+    nginx_backend_port: "{{ frontend_port | default(8443) }}"
+    nginx_https_port: "{{ https_port | default(443) }}"
+
+    nginx_cert_name: "lab_nginx"
+    nginx_ssl_ip: "{{ ansible_host }}"
+
+    nginx_ssl_dir: /etc/nginx/ssl
+    nginx_log_dir: /var/log/nginx
+    nginx_error_log_file: "{{ nginx_log_dir }}/error.log"
+    nginx_access_log_file: "{{ nginx_log_dir }}/access.log"
+    nginx_owner: "www-data"
+    nginx_group: "www-data"
+    nginx_proxy_conf_mode: "0644"
+    nginx_default_site_enabled_conf: /etc/nginx/sites-enabled/default
+    nginx_sites_available_dir: /etc/nginx/sites-available
+    
+  tasks:
+    - name: Przygotuj zmienne helper dla permission_baseline
+      ansible.builtin.set_fact:
+        nginx_ssl_dir_owner_baseline: "{{ (nginx_permission_baseline) | selectattr('path','equalto', nginx_ssl_dir) | map(attribute='owner') | list | last | default('root') }}"
+        nginx_ssl_dir_group_baseline: "{{ (nginx_permission_baseline) | selectattr('path','equalto', nginx_ssl_dir) | map(attribute='group') | list | last | default('root') }}"
+        nginx_ssl_dir_mode_baseline: "{{ (nginx_permission_baseline) | selectattr('path','equalto', nginx_ssl_dir) | map(attribute='mode') | list | last | default('0750') }}"
+        nginx_log_dir_owner_baseline: "{{ (nginx_permission_baseline) | selectattr('path','equalto', nginx_log_dir) | map(attribute='owner') | list | last | default('root') }}"
+        nginx_log_dir_group_baseline: "{{ (nginx_permission_baseline) | selectattr('path','equalto', nginx_log_dir) | map(attribute='group') | list | last | default('root') }}"
+        nginx_log_dir_mode_baseline: "{{ (nginx_permission_baseline) | selectattr('path','equalto', nginx_log_dir) | map(attribute='mode') | list | last | default('0750') }}"
+        nginx_error_log_file_owner_baseline: "{{ (nginx_permission_baseline) | selectattr('path','equalto', nginx_error_log_file) | map(attribute='owner') | list | last | default('root') }}"
+        nginx_error_log_file_group_baseline: "{{ (nginx_permission_baseline) | selectattr('path','equalto', nginx_error_log_file) | map(attribute='group') | list | last | default('root') }}"
+        nginx_error_log_file_mode_baseline: "{{ (nginx_permission_baseline) | selectattr('path','equalto', nginx_error_log_file) | map(attribute='mode') | list | last | default('0644') }}"
+        nginx_access_log_file_owner_baseline: "{{ (nginx_permission_baseline) | selectattr('path','equalto', nginx_access_log_file) | map(attribute='owner') | list | last | default('root') }}"
+        nginx_access_log_file_group_baseline: "{{ (nginx_permission_baseline) | selectattr('path','equalto', nginx_access_log_file) | map(attribute='group') | list | last | default('root') }}"
+        nginx_access_log_file_mode_baseline: "{{ (nginx_permission_baseline) | selectattr('path','equalto', nginx_access_log_file) | map(attribute='mode') | list | last | default('0644') }}"
+      run_once: true
+
+    - name: Nginx installation
+      block:
+        - name: Zdejmij blokade hold dla pakietow wymagajacych zmiany
+          ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+          vars:
+            package_guard_packages:
+              - "nginx-core={{ package_versions_effective['nginx-core'] }}"
+              - "openssl={{ package_versions_effective['openssl'] }}"
+
+        - name: Instalacja pakietow wymaganych dla Nginx i OpenSSL
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages:
+              - "nginx-core={{ package_versions_effective['nginx-core'] }}"
+              - "openssl={{ package_versions_effective['openssl'] }}"
+            package_guard_apt_update_cache: true
+
+        - name: Utworzenie katalogu na certyfikaty Nginx
+          ansible.builtin.file:
+            path: "{{ nginx_ssl_dir }}"
+            state: directory
+            owner: "{{ nginx_ssl_dir_owner_baseline }}"
+            group: "{{ nginx_ssl_dir_group_baseline }}"
+            mode: "{{ nginx_ssl_dir_mode_baseline }}"
+
+        - name: Upewnij sie, ze katalog logow Nginx istnieje
+          ansible.builtin.file:
+            path: "{{ nginx_log_dir }}"
+            state: directory
+            owner: "{{ nginx_log_dir_owner_baseline }}"
+            group: "{{ nginx_log_dir_group_baseline }}"
+            mode: "{{ nginx_log_dir_mode_baseline }}"
+
+        - name: Sprawdz istnienie plikow logow Nginx
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ nginx_error_log_file }}"
+            - "{{ nginx_access_log_file }}"
+          register: nginx_log_file_stats
+          loop_control:
+            label: "{{ item }}"
+
+        - name: Utworz brakujacy log bledow Nginx z baseline uprawnien
+          ansible.builtin.file:
+            path: "{{ nginx_error_log_file }}"
+            state: touch
+            owner: "{{ nginx_error_log_file_owner_baseline }}"
+            group: "{{ nginx_error_log_file_group_baseline }}"
+            mode: "{{ nginx_error_log_file_mode_baseline }}"
+          when: >-
+            not (
+              nginx_log_file_stats.results
+              | selectattr('item', 'equalto', nginx_error_log_file)
+              | map(attribute='stat.exists')
+              | first
+              | default(false)
+            )
+
+        - name: Utworz brakujacy log dostepu Nginx z baseline uprawnien
+          ansible.builtin.file:
+            path: "{{ nginx_access_log_file }}"
+            state: touch
+            owner: "{{ nginx_access_log_file_owner_baseline }}"
+            group: "{{ nginx_access_log_file_group_baseline }}"
+            mode: "{{ nginx_access_log_file_mode_baseline }}"
+          when: >-
+            not (
+              nginx_log_file_stats.results
+              | selectattr('item', 'equalto', nginx_access_log_file)
+              | map(attribute='stat.exists')
+              | first
+              | default(false)
+            )
+
+        - name: Egzekwuj baseline uprawnien dla istniejacych logow Nginx
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: file
+            owner: "{{ item.owner }}"
+            group: "{{ item.group }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - path: "{{ nginx_error_log_file }}"
+              owner: "{{ nginx_error_log_file_owner_baseline }}"
+              group: "{{ nginx_error_log_file_group_baseline }}"
+              mode: "{{ nginx_error_log_file_mode_baseline }}"
+            - path: "{{ nginx_access_log_file }}"
+              owner: "{{ nginx_access_log_file_owner_baseline }}"
+              group: "{{ nginx_access_log_file_group_baseline }}"
+              mode: "{{ nginx_access_log_file_mode_baseline }}"
+          loop_control:
+            label: "{{ item.path }}"
+
+        # Certyfikat jest lokalny i samopodpisany, wiec klienci musza mu
+        # osobno zaufac. Dalej szablon kieruje ruch do adresu backendu.
+        - name: Wygenerowanie certyfikatu self-signed dla Nginx
+          ansible.builtin.command:
+            argv:
+              - openssl
+              - req
+              - -x509
+              - -nodes
+              - -days
+              - "365"
+              - -newkey
+              - rsa:4096
+              - -keyout
+              - "{{ nginx_ssl_dir }}/{{ nginx_cert_name }}.key"
+              - -out
+              - "{{ nginx_ssl_dir }}/{{ nginx_cert_name }}.crt"
+              - -subj
+              - "/C=PL/ST=Slaskie/L=Lab/O=EngineeringLab/OU=Security/CN={{ nginx_domain_name }}"
+              - -addext
+              - "subjectAltName=DNS:{{ nginx_domain_name }},IP:{{ nginx_ssl_ip }}"
+          args:
+            creates: "{{ nginx_ssl_dir }}/{{ nginx_cert_name }}.crt"
+          notify: Reload Nginx
+
+
+        - name: Ustaw uprawnienia plikow certyfikatu Nginx
+          ansible.builtin.file:
+            path: "{{ nginx_ssl_dir }}/{{ item.name }}"
+            owner: "{{ nginx_ssl_dir_owner_baseline }}"
+            group: "{{ nginx_ssl_dir_group_baseline }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - name: "{{ nginx_cert_name }}.crt"
+              mode: "0644"
+            - name: "{{ nginx_cert_name }}.key"
+              mode: "0600"
+
+
+        - name: Usun domyslna konfiguracje Nginx
+          ansible.builtin.file:
+            path: "{{ nginx_default_site_enabled_conf }}"
+            state: absent
+          notify: Reload Nginx
+
+        - name: Wgraj konfiguracje reverse proxy Nginx
+          ansible.builtin.template:
+            src: "templates/nginx_proxy.conf.j2"
+            dest: "{{ nginx_sites_available_dir }}/{{ nginx_domain_name }}.conf"
+            owner: "{{ nginx_owner }}"
+            group: "{{ nginx_group }}"
+            mode: "{{ nginx_proxy_conf_mode }}"
+          notify: Reload Nginx
+
+        - name: Aktywuj konfiguracje reverse proxy Nginx
+          file:
+            src: "{{ nginx_sites_available_dir }}/{{ nginx_domain_name }}.conf"
+            dest: "{{ nginx_sites_enabled_dir }}/{{ nginx_domain_name }}.conf"
+            state: link
+          notify: Reload Nginx
+  
+        - name: Sprawdz konfiguracje Nginx
+          ansible.builtin.command: nginx -t
+          changed_when: false
+
+        - name: Upewnij sie, ze Nginx jest uruchomiony i wlaczony przy starcie
+          service:
+            name: nginx
+            state: started
+            enabled: yes
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Ustaw blokade hold dla pakietow
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages:
+              - "nginx-core={{ package_versions_effective['nginx-core'] }}"
+              - "openssl={{ package_versions_effective['openssl'] }}"
+
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: install_nginx"
+  handlers:
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded
+
+

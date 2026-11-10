@@ -1,0 +1,15 @@
+﻿# Specyficzne dla wszystkich serwerow zmienne.
+
+# Kolejnosc czytania vars: host_vars (edge, app, scanner) >
+# server_group_vars (edge_servers, app_servers, edge_servers) >
+# group_vars (blue_group i red_group) > all_vars
+ansible_user: __UZUPELNIJ_UZYTKOWNIK_BLUE__
+ansible_user_shell: /bin/bash
+ansible_port: 22
+ansible_ssh_private_key_file: __UZUPELNIJ_SCIEZKE_KLUCZA_SSH__
+lab_network_ip: __UZUPELNIJ_SIEC_LAB_CIDR__
+nat_gateway_ip: __UZUPELNIJ_IP_BRAMY__
+master_ip: __UZUPELNIJ_IP_KONTROLERA__
+# IP hosta Zabbix wykonujacego pasywne zapytania do agentow.
+zabbix_management_ip: __UZUPELNIJ_IP_KONTROLERA__
+zabbix_agent_port: 10050

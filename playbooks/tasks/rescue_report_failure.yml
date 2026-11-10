@@ -1,0 +1,29 @@
+---
+# ansible_failed_task/ansible_failed_result sa dostepne tylko w rescue i niosa realny powod bledu
+- name: Pokaz blad wykonania playbooka
+  ansible.builtin.debug:
+    msg: >-
+      {{
+        rescue_error_message
+        | default(
+            "Blad w zadaniu '" ~ (ansible_failed_task.name | default('nieznany task')) ~ "': " ~
+            (
+              ansible_failed_result.msg
+              | default(ansible_failed_result.stderr, true)
+              | default('brak szczegolow', true)
+            ) ~
+            ". Etckeeper sprawdzi i zapisze ewentualne czesciowe zmiany w /etc."
+          )
+      }}
+
+- name: Przerwij playbook po bledzie
+  ansible.builtin.fail:
+    msg: >-
+      {{
+        rescue_fail_message
+        | default(
+            "Playbook nie zostal zakonczony poprawnie (zadanie: '" ~
+            (ansible_failed_task.name | default('nieznany task')) ~
+            "')."
+          )
+      }}

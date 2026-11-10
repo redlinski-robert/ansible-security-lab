@@ -1,0 +1,24 @@
+---
+# Wspolne sciezki bazowe uzywane przez playboooki i role Ansible.
+# Cel: playbooki maja korzystac z tych zmiennych zamiast definiowac te same sciezki lokalnie.
+
+inventory_vars_root: "{{ inventory_dir | default('./inventories') }}"
+inventory_vars_hostfile: "{{ inventory_dir | default('./inventories') }}/hosts.yml"
+inventory_vars_group_vars_dir: "{{ inventory_dir | default('./inventories') }}/group_vars"
+inventory_vars_host_vars_dir: "{{ inventory_dir | default('./inventories') }}/host_vars"
+
+# Pliki konfiguracyjne i katalogi systemowe
+ssh_server_config_file: /etc/ssh/sshd_config
+sudoers_dir: /etc/sudoers.d
+netplan_config_dir: /etc/netplan
+netplan_dns_file: "{{ netplan_config_dir }}/99-ansible-dns.yaml"
+
+# Pliki i katalogi dla zainstalowanych pakietow
+etckeeper_config_file: /etc/etckeeper/etckeeper.conf
+etckeeper_git_dir: /etc/.git
+
+
+
+
+
+

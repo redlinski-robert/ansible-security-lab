@@ -1,0 +1,302 @@
+﻿---
+- name: Utwardzanie Dockera i wlaczenie OPA Docker AuthZ
+  hosts: app_servers
+  become: true
+  gather_facts: false
+
+  # Pobranie zmiennych z pliku z sekretami
+  #vars_files:
+  #  - ../vars/secrets.yml
+
+  vars:
+    docker_permission_baseline: "{{ permission_baseline | default([]) }}"
+
+    # Domyslne wartosci uzytkownika znajduja sie w
+    # inventories/group_vars/all/00_users_groups.yml
+    audit_packages:
+      - "auditd={{ package_versions_effective['auditd'] }}"
+      - "audispd-plugins={{ package_versions_effective['audispd-plugins'] }}"
+
+    # Zmienna yaml przechowujaca config
+    # userns-remap celowo pominiety: jest niekompatybilny z systemem pluginow Dockera (AuthZ)
+    docker_daemon_hardening:
+      live-restore: true
+      no-new-privileges: true
+      default-cgroupns-mode: "private"
+      log-driver: "local"
+      log-level: "info"
+      log-opts:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
+      icc: false
+      userland-proxy: false
+
+    docker_authz_enabled: true
+    docker_authz_plugin_alias: "opa-docker-authz"
+    docker_authz_plugin_image: "ghcr.io/open-policy-agent/opa-docker-authz:v0.10"
+    docker_daemon_authz_config:
+      authorization-plugins:
+        - "{{ docker_authz_plugin_alias }}"
+
+    # Klucze niekompatybilne z biezacym configiem (np. z Docker plugin system), ktore trzeba
+    # usunac z istniejacego daemon.json, bo combine() nigdy nie kasuje starych kluczy.
+    docker_daemon_keys_to_remove:
+      - userns-remap
+
+  tasks:
+  
+    # Zmienne helper dla permission_baseline Dockera służą
+    # tu do przygotowania zmiennych pomocniczych dla baseline uprawnień Dockera
+    - name: Przygotuj zmienne helper dla permission_baseline
+      ansible.builtin.set_fact:
+        # Przygotowuje zmienne pomocnicze dla baseline uprawnień Dockera
+        # np. właściciela, grupę i tryb plików i katalogów
+        # selectattr() służy do filtrowania elementów listy na podstawie atrybutu, np. 'path'
+        # map(attribute='owner') wybiera wartość atrybutu 'owner' dla przefiltrowanych elementów
+        # list | last | default('root') pobiera ostatni element listy lub domyślnie 'root' 
+        docker_audit_rules_file_owner_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_audit_rules_file) | map(attribute='owner') | list | last | default('root') }}"
+        docker_audit_rules_file_group_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_audit_rules_file) | map(attribute='group') | list | last | default('root') }}"
+        docker_audit_rules_file_mode_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_audit_rules_file) | map(attribute='mode') | list | last | default('0644') }}"
+        docker_config_dir_owner_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_config_dir) | map(attribute='owner') | list | last | default('root') }}"
+        docker_config_dir_group_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_config_dir) | map(attribute='group') | list | last | default('root') }}"
+        docker_config_dir_mode_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_config_dir) | map(attribute='mode') | list | last | default('0750') }}"
+        docker_authz_policy_dir_owner_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_authz_policy_dir) | map(attribute='owner') | list | last | default('root') }}"
+        docker_authz_policy_dir_group_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_authz_policy_dir) | map(attribute='group') | list | last | default('root') }}"
+        docker_authz_policy_dir_mode_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_authz_policy_dir) | map(attribute='mode') | list | last | default('0750') }}"
+        docker_authz_policy_file_owner_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_authz_policy_file) | map(attribute='owner') | list | last | default('root') }}"
+        docker_authz_policy_file_group_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_authz_policy_file) | map(attribute='group') | list | last | default('root') }}"
+        docker_authz_policy_file_mode_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_authz_policy_file) | map(attribute='mode') | list | last | default('0644') }}"
+        docker_daemon_config_file_owner_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_daemon_config_file) | map(attribute='owner') | list | last | default('root') }}"
+        docker_daemon_config_file_group_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_daemon_config_file) | map(attribute='group') | list | last | default('root') }}"
+        docker_daemon_config_file_mode_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_daemon_config_file) | map(attribute='mode') | list | last | default('0640') }}"
+      run_once: true
+
+    - name: Konfiguracja i hardening Dockera
+      block:
+        - name: Zdejmij blokade hold dla pakietow wymagajacych zmiany
+          ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+          vars:
+            package_guard_packages: "{{ audit_packages }}"
+
+        - name: Upewnij sie, ze grupa docker istnieje
+          ansible.builtin.group:
+            name: docker
+            state: present
+
+        - name: Instalacja auditd w ustalonych wersjach
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages: "{{ audit_packages }}"
+            package_guard_apt_update_cache: true
+            package_guard_apt_retries: 5
+            package_guard_apt_delay: 10
+
+        - name: Upewnij sie, ze auditd jest wlaczony
+          ansible.builtin.systemd:
+            name: auditd
+            enabled: true
+            state: started
+
+        - name: Dodaj reguly auditd dla Dockera
+          ansible.builtin.copy:
+            src: "files/docker/docker.rules"
+            dest: "{{ docker_audit_rules_file }}"
+            owner: "{{ docker_audit_rules_file_owner_baseline }}"
+            group: "{{ docker_audit_rules_file_group_baseline }}"
+            mode: "{{ docker_audit_rules_file_mode_baseline }}"
+          register: docker_audit_rules_copy
+
+        - name: Zaladuj reguly auditd
+          ansible.builtin.command: augenrules --load
+          when: docker_audit_rules_copy.changed
+          changed_when: false
+          failed_when: false
+
+        - name: Upewnij sie, ze katalog /etc/docker istnieje
+          ansible.builtin.file:
+            path: "{{ docker_config_dir }}"
+            state: directory
+            owner: "{{ docker_config_dir_owner_baseline }}"
+            group: "{{ docker_config_dir_group_baseline }}"
+            mode: "{{ docker_config_dir_mode_baseline }}"
+
+        # Aktualny JSON jest odczytywany z hosta i laczony z ustawieniami
+        # hardeningu, zamiast bezwarunkowo zastapic cala konfiguracje.
+        - name: Sprawdz, czy istnieje obecny daemon.json
+          ansible.builtin.stat:
+            path: "{{ docker_daemon_config_file }}"
+          register: docker_daemon_json_stat
+
+        - name: Wczytaj obecny daemon.json
+          ansible.builtin.slurp:
+            path: "{{ docker_daemon_config_file }}"
+          register: docker_daemon_json_raw
+          when: docker_daemon_json_stat.stat.exists
+
+        - name: Zparsuj obecny daemon.json
+          ansible.builtin.set_fact:
+            docker_daemon_current_config: "{{ docker_daemon_json_raw.content | b64decode | from_json }}"
+          when: docker_daemon_json_stat.stat.exists
+
+        - name: Ustaw pusty config, gdy daemon.json nie istnieje
+          ansible.builtin.set_fact:
+            docker_daemon_current_config: {}
+          when: not docker_daemon_json_stat.stat.exists
+
+        # Usuwane tutaj, zanim cokolwiek zostanie z tym configiem zrobione, zeby stary,
+        # niekompatybilny klucz (np. userns-remap z poprzedniego uruchomienia) nie zablokowal
+        # ponizszego "Upewnij sie, ze Docker dziala" jeszcze przed instalacja pluginu AuthZ.
+        - name: Usun przestarzale/niekompatybilne klucze z wczytanego configu
+          ansible.builtin.set_fact:
+            docker_daemon_current_config: "{{ docker_daemon_current_config | dict2items | rejectattr('key', 'in', docker_daemon_keys_to_remove) | items2dict }}"
+
+        # Najpierw konfiguracja bez pluginu pozwala uruchomic Dockera i
+        # zainstalowac AuthZ. Dopiero potem wlaczana jest konfiguracja docelowa.
+        - name: Zbuduj wstepny config Dockera (bez AuthZ, plugin jeszcze nie zainstalowany)
+          ansible.builtin.set_fact:
+            docker_daemon_interim_config: "{{ docker_daemon_current_config | combine(docker_daemon_hardening, recursive=True) }}"
+
+        - name: Zapisz wstepny daemon.json z walidacja
+          ansible.builtin.copy:
+            dest: "{{ docker_daemon_config_file }}"
+            content: "{{ docker_daemon_interim_config | to_nice_json }}"
+            owner: "{{ docker_daemon_config_file_owner_baseline }}"
+            group: "{{ docker_daemon_config_file_group_baseline }}"
+            mode: "{{ docker_daemon_config_file_mode_baseline }}"
+            backup: true
+            validate: "dockerd --validate --config-file=%s"
+          register: docker_daemon_json_interim_write
+
+        - name: Zrestartuj Dockera po zapisaniu wstepnego configu
+          ansible.builtin.systemd:
+            name: docker
+            state: restarted
+          when: docker_daemon_json_interim_write.changed
+
+        - name: Utworz katalog na polityki Docker AuthZ
+          ansible.builtin.file:
+            path: "{{ docker_authz_policy_dir }}"
+            state: directory
+            owner: "{{ docker_authz_policy_dir_owner_baseline }}"
+            group: "{{ docker_authz_policy_dir_group_baseline }}"
+            mode: "{{ docker_authz_policy_dir_mode_baseline }}"
+          when: docker_authz_enabled | bool
+
+        - name: Dodaj polityke OPA dla Docker AuthZ
+          ansible.builtin.copy:
+            src: "files/docker/docker-authz.rego"
+            dest: "{{ docker_authz_policy_file }}"
+            owner: "{{ docker_authz_policy_file_owner_baseline }}"
+            group: "{{ docker_authz_policy_file_group_baseline }}"
+            mode: "{{ docker_authz_policy_file_mode_baseline }}"
+          register: docker_authz_policy_copy
+          when: docker_authz_enabled | bool
+
+        - name: Upewnij sie, ze Docker dziala przed instalacja AuthZ pluginu
+          ansible.builtin.systemd:
+            name: docker
+            state: started
+            enabled: true
+          when: docker_authz_enabled | bool
+
+        - name: Sprawdz czy OPA Docker AuthZ plugin jest juz zainstalowany
+          ansible.builtin.command:
+            argv:
+              - docker
+              - plugin
+              - inspect
+              - "{{ docker_authz_plugin_alias }}"
+          register: docker_authz_plugin_inspect
+          failed_when: false
+          changed_when: false
+          when: docker_authz_enabled | bool
+
+        - name: Zainstaluj OPA Docker AuthZ plugin
+          ansible.builtin.command:
+            argv:
+              - docker
+              - plugin
+              - install
+              - --grant-all-permissions
+              - --alias
+              - "{{ docker_authz_plugin_alias }}"
+              - "{{ docker_authz_plugin_image }}"
+              - "opa-args=-policy-file /opa/policies/authz.rego"
+          when:
+            - docker_authz_enabled | bool
+            - docker_authz_plugin_inspect is defined
+            - docker_authz_plugin_inspect.rc != 0
+
+        # Plugin wczytuje plik .rego do OPA tylko raz przy starcie - nie wykrywa zmian na biezaco,
+        # wiec przy juz dzialajacym pluginie trzeba go zrestartowac po zmianie polityki.
+        # "docker plugin disable/enable" idzie przez API Dockera, ktore sam plugin blokuje
+        # regula is_plugin_modification (self-lockout) - dlatego uzywamy restartu na poziomie systemd,
+        # ktory omija AuthZ i wymusza ponowne wczytanie pluginu przez dockerd.
+        - name: Zrestartuj Dockera (i plugin AuthZ) po zmianie polityki
+          ansible.builtin.systemd:
+            name: docker
+            state: restarted
+          when:
+            - docker_authz_enabled | bool
+            - docker_authz_policy_copy.changed
+            - docker_authz_plugin_inspect is defined
+            - docker_authz_plugin_inspect.rc == 0
+
+        - name: Zbuduj docelowy config Dockera
+          # Slowniki ze zmiennej i z istniejacego configa zostaja polaczone.
+          # Nowe wartosci nadpisuja stare, ale zadne klucze nie zostana usuniete.
+          # Recursive zabezpiecza przed usunieciem parametrow znajdujacych sie wewnatrz wartosci kluczy.
+          # userns-remap jest niekompatybilny z systemem pluginow Dockera
+          # (AuthZ), dlatego nie wchodzi w sklad hardeningu.
+          # (usuwane wczesniej, zanim cokolwiek innego zostalo zrobione z configiem).
+          ansible.builtin.set_fact:
+            docker_daemon_target_config: "{{ docker_daemon_interim_config | combine(docker_daemon_authz_config, recursive=True) }}"
+
+        - name: Zapisz daemon.json z walidacja
+          ansible.builtin.copy:
+            dest: "{{ docker_daemon_config_file }}"
+            # to_nice_json zapisuje strukture Ansible/YAML jako czytelny, wielolinijkowy JSON.
+            # to_json tez bylby poprawny dla Dockera, ale zapisalby JSON w jednej linii.
+            content: "{{ docker_daemon_target_config | to_nice_json }}"
+            owner: "{{ docker_daemon_config_file_owner_baseline }}"
+            group: "{{ docker_daemon_config_file_group_baseline }}"
+            mode: "{{ docker_daemon_config_file_mode_baseline }}"
+            backup: true
+            # %s sprawia, ze Ansible utworzy config w tmp i tam dokona walidacji
+            # Po przeprowadzeniu poprawnej walidacji plik zostanie skopiowany do /etc/docker/daemon.json
+            # Tymczasowy plik z tmp zostanie usuniety po zakonczeniu walidacji (niezaleznie od wyniku)
+            validate: "dockerd --validate --config-file=%s"
+          register: docker_daemon_json_write
+
+        - name: Zrestartuj Dockera po zmianie configu
+          ansible.builtin.systemd:
+            name: docker
+            state: restarted
+          when: docker_daemon_json_write.changed
+
+        - name: Upewnij sie, ze Docker jest wlaczony
+          ansible.builtin.systemd:
+            name: docker
+            enabled: true
+            state: started
+
+        - name: Przeladuj reguly auditd po starcie Dockera
+          ansible.builtin.command: augenrules --load
+          changed_when: false
+          failed_when: false
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Ustaw blokade hold dla pakietow
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages: "{{ audit_packages }}"
+
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: harden_docker"

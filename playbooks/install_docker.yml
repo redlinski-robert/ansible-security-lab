@@ -1,0 +1,155 @@
+﻿---
+- name: Instalacja Docker lub Docker Compose
+  hosts: app_servers
+  become: yes
+  
+  vars:
+    docker_permission_baseline: "{{ permission_baseline | default([]) }}"
+
+    docker_dependencies:
+      - "ca-certificates={{ package_versions_effective['ca-certificates'] }}"
+      - "curl={{ package_versions_effective['curl'] }}"
+      - "gnupg={{ package_versions_effective['gnupg'] }}"
+      - "python3-pip={{ package_versions_effective['python3-pip'] }}"
+
+    docker_engine_packages:
+      - "docker-ce={{ package_versions_effective['docker-ce'] }}"
+      - "docker-ce-cli={{ package_versions_effective['docker-ce-cli'] }}"
+      - "containerd.io={{ package_versions_effective['containerd.io'] }}"
+      - "docker-compose-plugin={{ package_versions_effective['docker-compose-plugin'] }}"
+
+    docker_packages: "{{ docker_engine_packages }}"
+    docker_python_sdk_version: "{{ python_package_versions_effective['docker'] }}"
+
+    docker_config_dir: /etc/docker
+    docker_daemon_config_file: "{{ docker_config_dir }}/daemon.json"
+
+  tasks:
+    - name: Przygotuj zmienne helper dla permission_baseline
+      ansible.builtin.set_fact:
+        docker_daemon_config_file_owner_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_daemon_config_file) | map(attribute='owner') | list | last | default('root') }}"
+        docker_daemon_config_file_group_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_daemon_config_file) | map(attribute='group') | list | last | default('root') }}"
+        docker_daemon_config_file_mode_baseline: "{{ (docker_permission_baseline) | selectattr('path','equalto', docker_daemon_config_file) | map(attribute='mode') | list | last | default('0640') }}"
+      run_once: true
+
+    - name: Instalacja Docker lub Docker Compose
+      block:
+
+        - name: Zdejmij blokade hold dla pakietow wymagajacych zmiany
+          ansible.builtin.include_tasks: tasks/package_guard_unhold.yml
+          vars:
+            package_guard_packages: "{{ docker_dependencies + docker_packages }}"
+
+        # Klucz i repozytorium Dockera przygotowuja APT do instalacji silnika
+        # i Compose. Wersje pakietow sa pobierane z baseline inventory.
+        - name: Dodanie klucza GPG Dockera
+          ansible.builtin.apt_key:
+            url: https://download.docker.com/linux/ubuntu/gpg
+            state: present
+
+        - name: Dodanie repozytorium Docker
+          ansible.builtin.apt_repository:
+            repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+            state: present
+
+        # Na wypadek, gdyby konieczne bylo obnizenie wersji:
+        #
+        ## Samo gather_facts: true nie wystarczy
+        ## W instalacji trzeba ustawic wtedy force: yes (umozliwia downgrade)
+        #- name: Pobierz informacje o zainstalowanych pakietach
+        #  ansible.builtin.package_facts:
+        #      manager: auto
+        ## I dla kazdej paczki to samo (tu tylko dla Docker-CE - do pokazania jak to dziala)
+        #- name: Usun Docker-CE jesli wersja jest wyzsza niz zdefiniowana
+        #  apt:
+        #    name: docker-ce
+        #    state: absent
+        #  when:
+        #    - "'docker-ce' in ansible_facts.packages"
+        #    # strict=False ustala luzniejszy algorytm porownania
+        #    - "ansible_facts.packages['docker-ce'][0].version is version(docker_ce_version, '>', strict=False)"
+
+        - name: Instalacja zaleznosci w ustalonych wersjach
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages: "{{ docker_dependencies }}"
+            package_guard_apt_update_cache: true
+            package_guard_apt_retries: 5
+            package_guard_apt_delay: 10
+
+        - name: Instalacja silnika Docker i wtyczki Compose w ustalonych wersjach
+          ansible.builtin.include_tasks: tasks/package_guard_apt.yml
+          vars:
+            package_guard_packages: "{{ docker_packages }}"
+            package_guard_apt_update_cache: true
+            package_guard_apt_retries: 5
+            package_guard_apt_delay: 10
+          # na wypadek problemow z polaczeniem
+
+        - name: Instalacja biblioteki docker dla Pythona w ustalonej wersji
+          ansible.builtin.pip:
+            name: "docker=={{ docker_python_sdk_version }}"
+            state: present
+            executable: pip3
+
+        # w przypadku zainstalowanej wtyczki authz, trzeba tymczasowo usunac konfiguracje authz 
+        # z daemon.json, bo inaczej Docker nie uruchomi sie po instalacji
+        - name: Sprawdz, czy istnieje daemon.json
+          ansible.builtin.stat:
+            path: "{{ docker_daemon_config_file }}"
+          register: docker_daemon_json_stat
+
+        - name: Wczytaj daemon.json
+          ansible.builtin.slurp:
+            path: "{{ docker_daemon_config_file }}"
+          register: docker_daemon_json_raw
+          when: docker_daemon_json_stat.stat.exists
+
+        - name: Zparsuj daemon.json
+          ansible.builtin.set_fact:
+            docker_daemon_install_config: "{{ docker_daemon_json_raw.content | b64decode | from_json }}"
+          when: docker_daemon_json_stat.stat.exists
+
+        # Plugin AuthZ moze nie byc dostepny podczas instalacji silnika.
+        # Jego konfiguracja jest wowczas tymczasowo usuwana z daemon.json.
+        - name: Tymczasowo usun konfiguracje AuthZ pluginu z daemon.json podczas instalacji Dockera
+          ansible.builtin.copy:
+            dest: "{{ docker_daemon_config_file }}"
+            owner: "{{ docker_daemon_config_file_owner_baseline }}"
+            group: "{{ docker_daemon_config_file_group_baseline }}"
+            mode: "{{ docker_daemon_config_file_mode_baseline }}"
+            backup: true
+            content: >-
+              {{
+                docker_daemon_install_config
+                | dict2items
+                | rejectattr('key', 'equalto', 'authorization-plugins')
+                | list
+                | items2dict
+                | to_nice_json
+              }}
+          when:
+            - docker_daemon_json_stat.stat.exists
+            - docker_daemon_install_config is defined
+            - "'authorization-plugins' in docker_daemon_install_config"
+            
+        - name: Uruchomienie uslugi Docker
+          ansible.builtin.systemd:
+            name: docker
+            state: started
+            enabled: yes
+
+      rescue:
+        - name: Dolacz wspolna obsluge bledu
+          ansible.builtin.include_tasks: tasks/rescue_report_failure.yml
+
+      always:
+        - name: Ustaw blokade hold dla pakietow
+          ansible.builtin.include_tasks: tasks/package_guard_hold.yml
+          vars:
+            package_guard_packages: "{{ docker_dependencies + docker_packages }}"
+
+        - name: Dolacz wspolne taski etckeeper
+          ansible.builtin.include_tasks: tasks/commit_etckeeper.yml
+          vars:
+            etckeeper_commit_message: "Ansible: install_docker"

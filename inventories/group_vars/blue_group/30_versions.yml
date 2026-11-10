@@ -1,0 +1,18 @@
+---
+# Specyficzne dla serwerow blue wersje pakietow.
+
+package_versions_blue:
+  fail2ban: "0.11.2-6"
+  lynis: "3.0.7-1"
+  policykit-1: "0.105-33ubuntu0.2"
+  vim: "2:8.2.3995-1ubuntu2.36"
+  vim-common: "2:8.2.3995-1ubuntu2.36"
+  vim-runtime: "2:8.2.3995-1ubuntu2.36"
+  ufw: "0.36.1-4ubuntu0.1"
+  zabbix-agent2: "1:7.0.25-1+ubuntu22.04"
+  apparmor: "3.0.4-2ubuntu2.5"
+  apparmor-utils: "3.0.4-2ubuntu2.5"
+  apparmor-profiles: "3.0.4-2ubuntu2.5"
+
+# Mozna sprawdzic obecna wersje:
+# ansible all -i inventories/hosts.yml -m shell -a "for p in nazwa_pakietu nazwa_pakietu2 ; do echo '---' \$p '---'; dpkg -l \$p 2>/dev/null | grep '^ii' || echo 'not installed'; done" -u ansible --become

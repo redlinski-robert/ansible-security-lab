@@ -1,0 +1,11 @@
+---
+# Specyficzne dla serwerow scanner wersje pakietow.
+package_versions_scanner:
+  hydra: "9.7-2"
+  gzip: "1.13-1"
+  wordlists: "2026.2.0"
+  nikto: "1:2.6.1-0kali1"
+  nmap: "7.99+dfsg-1kali1"
+
+# Mozna sprawdzic obecna wersje:
+# ansible all -i inventories/hosts.yml -m shell -a "for p in nazwa_pakietu nazwa_pakietu2 ; do echo '---' \$p '---'; dpkg -l \$p 2>/dev/null | grep '^ii' || echo 'not installed'; done" -u ansible --become
