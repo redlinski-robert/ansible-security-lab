@@ -11,7 +11,7 @@ niezatwierdzonych zmianach na kazdym hoscie.
 - Repozytorium etckeeper: `/etc` na kazdym hoscie docelowym
 
 > Wszystkie komendy wykonuj na maszynie `management`, z katalogu glownego
-> projektu `ansible-lab`, tylko w przygotowanym srodowisku laboratoryjnym.
+> projektu `__UZUPELNIJ_NAZWA_PROJEKTU__`, tylko w przygotowanym srodowisku laboratoryjnym.
 > Skrypt rzeczywiscie zmienia stan maszyn: m.in. tworzy konto awaryjne,
 > zmienia uzytkownikow i hasla, instaluje pakiety, zmienia konfiguracje oraz
 > restartuje systemy. Przed uruchomieniem uzupelnij znaczniki w konfiguracji

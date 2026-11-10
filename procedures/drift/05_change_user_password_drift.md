@@ -7,7 +7,7 @@ Potwierdzenie, ze po recznej zmianie hasla ponowne wykonanie playbooka z ta sama
 - Host / zakres testowy: `edge`
 - Playbook remediacyjny: `playbooks/change_user_password.yml`
 
-> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `ansible-lab`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
+> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `__UZUPELNIJ_NAZWA_PROJEKTU__`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
 
 ## Procedura testowa
 

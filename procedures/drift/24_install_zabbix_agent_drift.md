@@ -7,7 +7,7 @@ Potwierdzenie, ze zmieniony `Server=` i zatrzymany agent Zabbix sa naprawiane.
 - Host / zakres testowy: `edge`
 - Playbook remediacyjny: `playbooks/install_zabbix_agent.yml`
 
-> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `ansible-lab`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
+> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `__UZUPELNIJ_NAZWA_PROJEKTU__`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
 
 ## Procedura testowa
 

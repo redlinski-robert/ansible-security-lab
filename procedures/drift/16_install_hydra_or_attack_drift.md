@@ -7,7 +7,7 @@ Potwierdzenie, ze usunieta Hydra jest odtwarzana przed kontrolowanym testem w la
 - Host / zakres testowy: `scanner`
 - Playbook remediacyjny: `playbooks/install_hydra_or_attack.yml`
 
-> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `ansible-lab`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
+> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `__UZUPELNIJ_NAZWA_PROJEKTU__`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
 
 > **Warunek wstepny:** przy domyslnym `get_rotated_passwords: true` playbook wymaga plikow utworzonych przez `rotate_passwords.yml`. Jezeli ich nie ma, najpierw wykonaj `playbooks/rotate_passwords.yml`. Input z Nmap jest opcjonalny, poniewaz przy jego braku playbook buduje cele z inventory.
 

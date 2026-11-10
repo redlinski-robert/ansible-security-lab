@@ -6,7 +6,7 @@
   vars:
     nginx_permission_baseline: "{{ permission_baseline | default([]) }}"
 
-    nginx_domain_name: "mojeansible.pl"
+    nginx_domain_name: "__UZUPELNIJ_DOMENA_APLIKACJI__"
     nginx_backend_ip: "__UZUPELNIJ_IP_APP__"
     # backend wzgledem nginxa, dlatego port frontendu
     nginx_backend_port: "{{ frontend_port | default(8443) }}"

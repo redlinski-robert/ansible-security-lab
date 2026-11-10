@@ -8,9 +8,9 @@ set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Gdy skrypt zostanie skopiowany do katalogu ansible-lab, ROOT_DIR jest poprawny.
+# Gdy skrypt zostanie skopiowany do katalogu __UZUPELNIJ_NAZWA_PROJEKTU__, ROOT_DIR jest poprawny.
 # Przy uruchomieniu z innej lokalizacji mozna podac jawnie:
-#   ANSIBLE_LAB_ROOT=/home/__UZUPELNIJ_UZYTKOWNIK_KONTROLERA__/ansible-lab ./test_drift.sh
+#   ANSIBLE_LAB_ROOT=/home/__UZUPELNIJ_UZYTKOWNIK_KONTROLERA__/__UZUPELNIJ_NAZWA_PROJEKTU__ ./test_drift.sh
 if [[ -n "${ANSIBLE_LAB_ROOT:-}" ]]; then
     ROOT_DIR="$(cd "${ANSIBLE_LAB_ROOT}" && pwd)"
 fi
@@ -521,14 +521,14 @@ test_d10() {
     stage "1. Ustal stan poprawny" ansible-playbook -i "${INVENTORY}" "${PLAYBOOK_DIR}/install_nginx.yml" --limit edge
     block_if_baseline_failed && return
 
-    stage "2. Wprowadz kontrolowany dryft" ansible edge -i "${INVENTORY}" -b -m shell -a "echo '# DRIFT_TEST' >> /etc/nginx/sites-available/mojeansible.pl.conf"
-    stage "3. Potwierdz dryft" ansible edge -i "${INVENTORY}" -b -m shell -a "tail -n 3 /etc/nginx/sites-available/mojeansible.pl.conf; nginx -t; grep -q DRIFT_TEST /etc/nginx/sites-available/mojeansible.pl.conf"
+    stage "2. Wprowadz kontrolowany dryft" ansible edge -i "${INVENTORY}" -b -m shell -a "echo '# DRIFT_TEST' >> /etc/nginx/sites-available/__UZUPELNIJ_DOMENA_APLIKACJI__.conf"
+    stage "3. Potwierdz dryft" ansible edge -i "${INVENTORY}" -b -m shell -a "tail -n 3 /etc/nginx/sites-available/__UZUPELNIJ_DOMENA_APLIKACJI__.conf; nginx -t; grep -q DRIFT_TEST /etc/nginx/sites-available/__UZUPELNIJ_DOMENA_APLIKACJI__.conf"
     pause_for_screenshot "D10_A_dryft"
 
     stage "4. Uruchom remediacje" ansible-playbook -i "${INVENTORY}" "${PLAYBOOK_DIR}/install_nginx.yml" --limit edge
     pause_for_screenshot "D10_B_ansible"
 
-    stage "5. Zweryfikuj stan po remediacji" ansible edge -i "${INVENTORY}" -b -m shell -a "grep -n DRIFT_TEST /etc/nginx/sites-available/mojeansible.pl.conf || echo DRIFT_USUNIETY; nginx -t; systemctl is-active nginx; ! grep -q DRIFT_TEST /etc/nginx/sites-available/mojeansible.pl.conf"
+    stage "5. Zweryfikuj stan po remediacji" ansible edge -i "${INVENTORY}" -b -m shell -a "grep -n DRIFT_TEST /etc/nginx/sites-available/__UZUPELNIJ_DOMENA_APLIKACJI__.conf || echo DRIFT_USUNIETY; nginx -t; systemctl is-active nginx; ! grep -q DRIFT_TEST /etc/nginx/sites-available/__UZUPELNIJ_DOMENA_APLIKACJI__.conf"
     pause_for_screenshot "D10_C_po_remediacji"
 
     finish_test

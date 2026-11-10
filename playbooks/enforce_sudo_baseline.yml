@@ -5,7 +5,6 @@
   gather_facts: false
   any_errors_fatal: true
 
-  # ToDo - testy z wyciaganiem zmiennych z vars files sudo_baseline_accounts.yml
   # --check i --diff powinny pokazac, jakie zmiany zostana wprowadzone,
   # np. dodane/zmienione pliki sudoers, zmiany w grupach uzytkownikow itp.
   

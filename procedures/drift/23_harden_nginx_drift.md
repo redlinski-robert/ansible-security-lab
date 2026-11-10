@@ -7,7 +7,7 @@ Potwierdzenie, ze reczne przelaczenie ModSecurity z `On` na `DetectionOnly` jest
 - Host / zakres testowy: `edge`
 - Playbook remediacyjny: `playbooks/harden_nginx.yml`
 
-> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `ansible-lab`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
+> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `__UZUPELNIJ_NAZWA_PROJEKTU__`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
 
 ## Procedura testowa
 

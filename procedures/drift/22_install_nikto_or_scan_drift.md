@@ -7,7 +7,7 @@ Potwierdzenie, ze usuniety Nikto jest ponownie instalowany przed skanowaniem.
 - Host / zakres testowy: `scanner`
 - Playbook remediacyjny: `playbooks/install_nikto_or_scan.yml`
 
-> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `ansible-lab`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
+> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `__UZUPELNIJ_NAZWA_PROJEKTU__`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
 
 > **Warunek wstepny:** `nikto_input_file` moze pochodzic z wczesniejszego uruchomienia Nmap, ale jego brak nie blokuje testu - playbook ma sciezke zapasowa budujaca cele z inventory.
 

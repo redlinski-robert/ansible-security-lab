@@ -37,7 +37,7 @@ Wyjasnienie: `aa-status` pokazuje, czy profil AppArmor dla Nginx jest zaladowany
 curl -kI https://EDGE
 ```
 
-Wyjasnienie: zastap `EDGE` adresem IP lub nazwa rozwiazywana z maszyny `management`, np. `__UZUPELNIJ_IP_EDGE__`. Ta komenda sprawdza, czy serwer odpowiada na zadanie HTTPS i zwraca naglowki HTTP. Jesli uzywasz domeny, musi ona wskazywac adres `edge` w DNS albo w pliku `/etc/hosts`; `mojeansible.pl` bylo tylko przykladowa nazwa.
+Wyjasnienie: zastap `EDGE` adresem IP lub nazwa rozwiazywana z maszyny `management`, np. `__UZUPELNIJ_IP_EDGE__`. Ta komenda sprawdza, czy serwer odpowiada na zadanie HTTPS i zwraca naglowki HTTP. Jesli uzywasz domeny __domena, musi ona wskazywac adres `edge` w DNS albo w pliku `/etc/hosts`; `__UZUPELNIJ_DOMENA_APLIKACJI__` bylo tylko przykladowa nazwa.
 
 ## 5) Test TLS 1.2
 

@@ -7,7 +7,7 @@ Potwierdzenie, ze recznie zatrzymana i wylaczona usluga Docker jest przywracana 
 - Host / zakres testowy: `app`
 - Playbook remediacyjny: `playbooks/install_docker.yml`
 
-> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `ansible-lab`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
+> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `__UZUPELNIJ_NAZWA_PROJEKTU__`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
 
 ## Procedura testowa
 

@@ -7,7 +7,7 @@ Potwierdzenie remediacji brakujacego `zabbix_get` na kontrolerze oraz poprawnego
 - Host / zakres testowy: `edge,localhost`
 - Playbook remediacyjny: `playbooks/install_zabbix_get_or_test_zabbix_agent.yml`
 
-> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `ansible-lab`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
+> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `__UZUPELNIJ_NAZWA_PROJEKTU__`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
 
 ## Procedura testowa
 

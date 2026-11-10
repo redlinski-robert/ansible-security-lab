@@ -7,7 +7,7 @@ Potwierdzenie, ze recznie zmieniona konfiguracja reverse proxy jest nadpisywana 
 - Host / zakres testowy: `edge`
 - Playbook remediacyjny: `playbooks/install_nginx.yml`
 
-> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `ansible-lab`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
+> Wszystkie komendy wykonuj w srodowisku laboratoryjnym, z katalogu glownego projektu `__UZUPELNIJ_NAZWA_PROJEKTU__`. Wprowadzaj tylko **jeden dryft naraz** i ogranicz test do jednego hosta przez `--limit`, jesli playbook na to pozwala.
 
 ## Procedura testowa
 
@@ -18,12 +18,12 @@ ansible-playbook -i inventories/hosts.yml playbooks/install_nginx.yml --limit ed
 
 ### 2. Wprowadz kontrolowany dryft
 ```bash
-ansible edge -i inventories/hosts.yml -b -m shell -a "echo '# DRIFT_TEST' >> /etc/nginx/sites-available/mojeansible.pl.conf"
+ansible edge -i inventories/hosts.yml -b -m shell -a "echo '# DRIFT_TEST' >> /etc/nginx/sites-available/__UZUPELNIJ_DOMENA_APLIKACJI__.conf"
 ```
 
 ### 3. Potwierdz wystapienie dryftu
 ```bash
-ansible edge -i inventories/hosts.yml -b -m shell -a "tail -n 3 /etc/nginx/sites-available/mojeansible.pl.conf; nginx -t"
+ansible edge -i inventories/hosts.yml -b -m shell -a "tail -n 3 /etc/nginx/sites-available/__UZUPELNIJ_DOMENA_APLIKACJI__.conf; nginx -t"
 ```
 Stan niezgodny musi byc widoczny **przed** ponownym uruchomieniem playbooka.
 
@@ -35,7 +35,7 @@ W logu Ansible zadanie odpowiedzialne za naprawe powinno przejsc jako `changed`.
 
 ### 5. Zweryfikuj stan po remediacji
 ```bash
-ansible edge -i inventories/hosts.yml -b -m shell -a "grep -n DRIFT_TEST /etc/nginx/sites-available/mojeansible.pl.conf || echo DRIFT_USUNIETY; nginx -t; systemctl is-active nginx"
+ansible edge -i inventories/hosts.yml -b -m shell -a "grep -n DRIFT_TEST /etc/nginx/sites-available/__UZUPELNIJ_DOMENA_APLIKACJI__.conf || echo DRIFT_USUNIETY; nginx -t; systemctl is-active nginx"
 ```
 
 ## Kryteria zaliczenia

@@ -1,0 +1,8 @@
+# Ustawienia lokalnego edytora nie są potrzebne w obrazie.
+.vscode/
+
+# Zależności są instalowane wewnątrz obrazu przez npm install.
+node_modules/
+
+# Lokalne artefakty buildu nie są używane przez kontener developerski.
+dist/

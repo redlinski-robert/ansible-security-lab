@@ -9,7 +9,7 @@ export default defineConfig({
     port: 5173,
 
     allowedHosts: [
-      'mojeansible.pl',
+      '__UZUPELNIJ_DOMENA_APLIKACJI__',
       '__UZUPELNIJ_IP_EDGE__',
       '__UZUPELNIJ_IP_APP__'
     ],

@@ -7,10 +7,10 @@ $ErrorActionPreference = "Stop"
 # ------------------------------------------------------------
 # KONFIGURACJA
 # ------------------------------------------------------------
+# Ścieżka do VBoxManage.exe
+$VBoxManage = "__UZUPELNIJ_SCIEZKA_DO_VBOXMANAGE__"
 
-$VBoxManage = "C:\Sciezka\do\VBoxManage.exe"
-
-$HostOnlyAdapter = "VirtualBox Host-Only Ethernet Adapter #3"
+$HostOnlyAdapter = "__UZUPELNIJ_NAZWA_ADAPTERA_HOST_ONLY__"
 
 # Typ uruchamiania:
 # gui      - normalne okna VirtualBox
@@ -22,9 +22,9 @@ $ManagementIp = "127.0.0.1"
 $SshPort     = 2222
 $RemoteUser = "__UZUPELNIJ_UZYTKOWNIK_KONTROLERA__"
 
-$LocalProjectPath = "C:\ansibleInzyn\ansible-lab"
+$LocalProjectPath = "__UZUPELNIJ_SCIEZKA_DO_PROJEKTU_LOCAL__\__UZUPELNIJ_NAZWA_PROJEKTU__"
 $RemoteHome        = "/home/__UZUPELNIJ_UZYTKOWNIK_KONTROLERA__"
-$RemoteProjectPath = "/home/__UZUPELNIJ_UZYTKOWNIK_KONTROLERA__/ansible-lab"
+$RemoteProjectPath = "/home/__UZUPELNIJ_UZYTKOWNIK_KONTROLERA__/__UZUPELNIJ_NAZWA_PROJEKTU__"
 
 $SshWaitTimeout = 120
 
@@ -421,7 +421,7 @@ if ($sshProcess.ExitCode -ne 0) {
 }
 
 Write-Host ""
-Write-Host "Stary katalog ansible-lab usuniety." -ForegroundColor Green
+Write-Host "Stary katalog __UZUPELNIJ_NAZWA_PROJEKTU__ usuniety." -ForegroundColor Green
 
 # ============================================================
 # ETAP 7 - KOPIOWANIE PROJEKTU
@@ -460,9 +460,9 @@ Write-Host " ETAP 8 - POPRAWA UPRAWNIEN ANSIBLE-LAB"
 Write-Host "============================================================"
 Write-Host ""
 
-Write-Host "Usuwam prawo zapisu dla others z ~/ansible-lab..." -ForegroundColor Yellow
+Write-Host "Usuwam prawo zapisu dla others z ~/__UZUPELNIJ_NAZWA_PROJEKTU__..." -ForegroundColor Yellow
 
-$chmodCommand = "ssh -p $SshPort ${RemoteUser}@${ManagementIp} `"chmod -R o-w ~/ansible-lab`""
+$chmodCommand = "ssh -p $SshPort ${RemoteUser}@${ManagementIp} `"chmod -R o-w ~/__UZUPELNIJ_NAZWA_PROJEKTU__`""
 
 $chmodProcess = Start-Process `
     -FilePath "cmd.exe" `

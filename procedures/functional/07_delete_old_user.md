@@ -2,8 +2,6 @@
 
 Przed testem utworz wylacznie przeznaczone do usuniecia konto testowe. Po uruchomieniu playbooka, z maszyny `management` wykonaj:
 
-
-
 W zwyklym trybie brak konta, katalogu home, procesow oraz pliku `/etc/sudoers.d/OLD-user` oznacza poprawny wynik. Proba nowego logowania jako `OLD` powinna zostac odrzucona.
 
 `90-` to zwykla konwencja nazwy, ktora ustala kolejnosc czytania plikow w `/etc/sudoers.d`. Nie jest tworzona automatycznie przez Ansible ani system. Wspolny wpis sudoers dla grupy nie jest usuwany, poniewaz moze byc uzywany przez innych uzytkownikow. Usuniecie konta automatycznie odbiera mu czlonkostwo w grupie `sudo`.

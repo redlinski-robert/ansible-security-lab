@@ -36,6 +36,7 @@ wystapienia danego znacznika odpowiednia wartoscia:
 
 | Znacznik | Wymagana wartosc |
 | --- | --- |
+| `__UZUPELNIJ_NAZWA_PROJEKTU__` | Nazwa projektu (domyślnie nazwa katalogu głównego projektu) |
 | `__UZUPELNIJ_UZYTKOWNIK_KONTROLERA__` | Uzytkownik na wezle sterujacym |
 | `__UZUPELNIJ_GRUPE_KONTROLERA__` | Grupa na wezle sterujacym |
 | `__UZUPELNIJ_UZYTKOWNIK_BLUE__` | Dotychczasowy uzytkownik hostow blue |
@@ -115,7 +116,6 @@ jesli katalog domowy znajduje sie gdzie indziej.
 ## Przed publikacja
 
 Playbook `harden_nginx.yml` zachowuje publiczny adres GitHub autora jako
-awaryjne zrodlo pakietu. Adres identyfikuje autora i nalezy go uwzglednic
-przy publikacji. Sprawdz rowniez sekrety, lokalne pliki, zaleznosci, logi,
+awaryjne zrodlo pakietu. Sprawdz sekrety, lokalne pliki, zaleznosci, logi,
 raporty i historie Git. Same znaczniki nie anonimizuja historii ani innych
 danych, ktore mogly tam trafic.
