@@ -6,3 +6,12 @@ node_modules/
 
 # Lokalne artefakty buildu nie są używane przez kontener developerski.
 dist/
+
+# Wykluczenie pliku definiującego reguły ignorowania przez Git - dobra praktyka na produkcji
+.gitignore
+
+# Wykluczenie pliku konfiguracyjnego Docker Ignore z kontekstu budowania - dobra praktyka na produkcji
+.dockerignore
+
+# Wykluczenie pliku konfiguracyjnego Docker Ignore z kontekstu budowania - dobra praktyka na produkcji
+Dockerfile
