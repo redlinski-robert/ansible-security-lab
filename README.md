@@ -153,13 +153,6 @@ kroki, ale nie zastepuja wszystkich kontroli recznych.
 | [test_lynis.sh](test_lynis.sh) | Uruchamia Lynis na poczatku i ponownie w trakcie sekwencji playbookow. Rejestruje statusy, kody zakonczenia i czas wykonania playbookow. Po ich bledach kontynuuje sekwencje i na koncu zwraca blad zbiorczy. |
 | [test_etckeeper_auditability.sh](test_etckeeper_auditability.sh) | Instaluje etckeeper przed trwalymi zmianami ustawien aktualizacji, wykonuje pozostale playbooki i zbiera historie oraz stan repozytoriow `/etc` na hostach. |
 
-Test relacyjny obejmuje m.in. probe znalezienia znanego hasla z ograniczonego,
-trzyhaslowego slownika, ponowienie proby po rotacji hasla, sprawdzenie
-rzeczywistej blokady SSH przez Fail2Ban oraz dostepnosci portow po zmianie
-regul firewalla. Wykonuje tez skany Nmap i Nikto na kolejnych etapach
-konfiguracji. Brak trafienia w slowniku nie dowodzi ogolnej odpornosci hasla,
-a wyniki skanow wymagaja osobnej interpretacji.
-
 ### Uruchamianie i ocena
 
 Skrypty uruchamiaj przez Bash na kontrolerze Ansible, po uzupelnieniu
